@@ -202,12 +202,14 @@ class SystemReader:
                 lo, hi = st.bottom + 0.5 * st.space, g.y - 0.3 * st.space
             else:
                 lo, hi = g.y + 0.3 * st.space, st.top - 0.5 * st.space
-            n = sum(
-                1 for s in ledgers
+            ys = [
+                s.y0 for s in ledgers
                 if min(s.x0, s.x1) - 0.3 * st.space <= cx <= max(s.x0, s.x1) + 0.3 * st.space
                 and lo <= s.y0 <= hi
-            )
-            if n > best_n:
+            ]
+            # the ledger lines must reach the note; lines far from it belong to other notes
+            n = len(ys) if any(abs(y - g.y) < 1.1 * st.space for y in ys) else 0
+            if n > best_n or (n == best_n and n and best is not None and st.distance(g.y) < best.staff.distance(g.y)):
                 best, best_n = c, n
         return best
 
