@@ -292,9 +292,46 @@ def _cross_staff_runs(parts: list[Part]) -> None:
                     if cur[v] < expected:
                         keep.append(_hidden(last_x[v] + 0.01, expected - cur[v], v, staff))
                 m.events = keep
+            _borrowed_notes(m, expected)
             if all(sum((e.duration for e in m.events if e.voice == v and not e.grace), Fraction(0)) == expected
                    for v in {e.voice for e in m.events}):
                 m.warnings = [w for w in m.warnings if not w.startswith("voice")]
+
+
+def _borrowed_notes(m: Measure, expected: Fraction) -> None:
+    """Notes a voice crosses over to the other staff for: one staff is too long by a beamed
+    run, and the other staff has an invisible rest of exactly that length where the run stands.
+    The run stays where it is printed, as a voice of its own timed by that gap."""
+    def total(v):
+        return sum((e.duration for e in m.events if e.voice == v and not e.grace), Fraction(0))
+
+    for vx in sorted({e.voice for e in m.events}):
+        excess = total(vx) - expected
+        if excess <= 0:
+            continue
+        evs = sorted((e for e in m.events if e.voice == vx and not e.grace), key=lambda e: e.x)
+        staff = evs[0].staff
+        free = [v for v in range(1 + 4 * (staff - 1), 5 + 4 * (staff - 1)) if not any(e.voice == v for e in m.events)]
+        if not free:
+            continue
+        for h in [e for e in m.events if e.hidden and e.duration == excess and e.staff != staff]:
+            mine = sorted((e for e in m.events if e.voice == h.voice and not e.grace), key=lambda e: e.x)
+            before = [e for e in mine if e.x < h.x and e is not h]
+            lo = max((e.x for e in before), default=-1e9)
+            hi = min((e.x for e in mine if e.x > h.x), default=1e9)
+            run = [e for e in evs if lo < e.x < hi]
+            if not run or any(e.is_rest or e.base >= 1 for e in run) or len({e.stem for e in run}) != 1 \
+                    or sum(e.duration for e in run) != excess:
+                continue
+            start = sum((e.duration for e in before), Fraction(0))
+            v = free[0]
+            for e in run:
+                e.voice = v
+            if start:
+                m.events.append(_hidden(run[0].x - 0.01, start, v, staff))
+            if start + excess < expected:
+                m.events.append(_hidden(run[-1].x + 0.01, expected - start - excess, v, staff))
+            return
 
 
 def _hidden(x: float, duration: Fraction, voice: int, staff: int) -> Event:

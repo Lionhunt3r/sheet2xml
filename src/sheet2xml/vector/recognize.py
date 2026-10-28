@@ -188,6 +188,7 @@ class SystemReader:
         self.carry = carry  # per staff position in system order: last clef/key/time
         self.sp = sum(s.space for s in system.staves) / len(system.staves)
         self.lyric_texts: set[int] = set()  # texts read as lyrics
+        self.contents: list[StaffContent] = []
         self.warnings: list[str] = []
 
     # ------------------------------------------------------------------ setup
@@ -219,6 +220,7 @@ class SystemReader:
             best = min(everything, key=lambda c: (c.staff.distance(t.origin_y), abs(t.origin_y - c.staff.middle)))
             best.texts.append(t)
         self._gap_rests(contents)
+        self.contents = contents
         return contents
 
     def _gap_rests(self, contents: list[StaffContent]) -> None:
@@ -1099,8 +1101,20 @@ class SystemReader:
             if g.name in ("time.3", "time.5", "time.6") and g.size < 0.75 * normal and id(g) not in used_ids:
                 if st.distance(g.y) > 0.5 * sp:
                     numbers.append((g.cx, g.y, int(g.name.split(".")[1])))
+        # a number between the two staves of a piano may belong to either of them:
+        # the other staff's numbers count here too, decided by whether the measure adds up
+        borrowed = set()
+        for o in self.contents:
+            if o.staff is st or not self._braced(st, o.staff):
+                continue
+            lo, hi = sorted((st.middle, o.staff.middle))
+            for g in o.glyphs:
+                if g.name.startswith("tuplet.") and lo < g.y < hi and st.distance(g.y) > 0.5 * sp \
+                        and o.staff.distance(g.y) > 0.5 * sp:
+                    numbers.append((g.cx, g.y, int(g.name.split(".")[1])))
+                    borrowed.add(len(numbers) - 1)
         # merge multi-digit numbers like "12" are rare for tuplets; ignore
-        for x, y, n in numbers:
+        for ni, (x, y, n) in enumerate(numbers):
             normal_n = {2: 3, 3: 2, 4: 6, 5: 4, 6: 4, 7: 4, 9: 8}.get(n)
             if not normal_n:
                 continue
@@ -1171,7 +1185,7 @@ class SystemReader:
                     key=lambda e: abs(e.x - x),
                 )
                 group = near[: n]
-            if group and not self._near_group(st, group, y):
+            if group and (ni in borrowed or not self._near_group(st, group, y)):
                 if self._near_group(st, group, y, crowded_ok=True):
                     # between two staves: decided later by whether the measure adds up
                     for e in group:
@@ -1352,6 +1366,8 @@ class SystemReader:
             saved = [(it, it.voice) for it in chords + rests]
             self._split_voices(st, chords, rests)
             alt = self._make_events(chords, rests, clef, key, clef_changes, expected)
+            if self._voice_errors(alt, expected):
+                self._fill_hidden_rests(alt, expected, sp)  # the second voice may pause unseen
             if not self._voice_errors(alt, expected):
                 events = alt
             else:
