@@ -163,6 +163,8 @@ class _Writer:
         self.w(f'  <part id="P{idx}">')
         self.clef_now: dict[int, object] = {}
         self.in_word: dict[int, bool] = {}  # verse -> the last syllable continues the word
+        self.slur_number: dict[int, int] = {}  # slur id -> MusicXML number in use
+        self.slur_open: dict[int, list[int]] = {}  # staff -> numbers of slurs going on in the next system
         pickup = False
         if p.measures:
             m0 = p.measures[0]
@@ -204,9 +206,12 @@ class _Writer:
         if att:
             self.w("      <attributes>" + "".join(att) + "</attributes>")
 
-        if m.repeat_start:
-            self.w('      <barline location="left"><bar-style>heavy-light</bar-style>'
-                   '<repeat direction="forward"/></barline>')
+        if m.repeat_start or m.ending_start:
+            style = "<bar-style>heavy-light</bar-style>" if m.repeat_start else ""
+            ending = (f'<ending number="{m.ending_start[0]}" type="start">{escape(m.ending_start[1])}</ending>'
+                      if m.ending_start else "")
+            repeat = '<repeat direction="forward"/>' if m.repeat_start else ""
+            self.w(f'      <barline location="left">{style}{ending}{repeat}</barline>')
         voices = sorted({e.voice for e in m.events}) or [1]
         expected = m.expected or Fraction(4)
         full = max([_voice_len(m, v) for v in voices] + [Fraction(0)])
@@ -235,8 +240,11 @@ class _Writer:
                         line = "" if c.sign == "percussion" else f"<line>{c.line}</line>"
                         self.w(f"      <attributes><clef{num}><sign>{c.sign}</sign>{line}</clef></attributes>")
                     keep = []
+                    next_x = next((o.x for o in evs[ei + 1:] if o.staff == e.staff), math.inf)
                     for d in pending_dirs:
-                        if d.staff == e.staff and d.x <= e.x + 2:
+                        # a hairpin starts at the note it begins under; everything else at the next note
+                        opens = d.kind in ("wedge", "octave-shift") and not d.text.startswith("stop")
+                        if d.staff == e.staff and (d.x < next_x - 4 if opens else d.x <= e.x + 2):
                             self.direction(d, p.staves)
                         else:
                             keep.append(d)
@@ -260,12 +268,19 @@ class _Writer:
                 self.w(f"      <forward><duration>{self.dur(measure_len - pos)}</duration></forward>")
         for d in pending_dirs:
             self.direction(d, p.staves)
+        for _, s_, c in pending_clefs:  # a clef change just before the barline
+            if self.clef_now.get(s_) != c:
+                self.clef_now[s_] = c
+                num = f' number="{s_}"' if p.staves > 1 else ""
+                line = "" if c.sign == "percussion" else f"<line>{c.line}</line>"
+                self.w(f"      <attributes><clef{num}><sign>{c.sign}</sign>{line}</clef></attributes>")
+        ending = (f'<ending number="{m.ending_stop[0]}" type="{m.ending_stop[1]}"/>' if m.ending_stop else "")
         if m.barline == "repeat-end":
             self.w('      <barline location="right"><bar-style>light-heavy</bar-style>'
-                   '<repeat direction="backward"/></barline>')
-        elif m.barline:
-            style = {"final": "light-heavy", "double": "light-light"}.get(m.barline, "regular")
-            self.w(f'      <barline location="right"><bar-style>{style}</bar-style></barline>')
+                   f'{ending}<repeat direction="backward"/></barline>')
+        elif m.barline or ending:
+            style = {"final": "light-heavy", "double": "light-light"}.get(m.barline or "", "regular")
+            self.w(f'      <barline location="right"><bar-style>{style}</bar-style>{ending}</barline>')
         self.w("    </measure>")
 
     def direction(self, d, staves: int) -> None:
@@ -278,6 +293,11 @@ class _Writer:
                 return
         if d.kind == "dynamic" and d.text in DYNAMICS:
             body = f"<dynamics><{d.text}/></dynamics>"
+        elif d.kind == "octave-shift":
+            kind, size = d.text.split()
+            body = f'<octave-shift type="{kind}" size="{size}"/>'
+        elif d.kind == "wedge":
+            body = f'<wedge type="{d.text}"/>'
         elif d.kind == "rehearsal":
             body = f'<rehearsal enclosure="square">{escape(d.text)}</rehearsal>'
         elif d.kind == "tempo":
@@ -341,6 +361,7 @@ class _Writer:
             if pt.tie_start:
                 nota += '<tied type="start"/>'
             if i == 0:
+                nota += self._slur_notation(e)
                 nota += self._tuplet_notation(e, tstart, tstop)
                 groups = {"ornaments": ORNAMENTS, "technical": TECHNICAL}
                 for tag, names in groups.items():
@@ -360,6 +381,32 @@ class _Writer:
                         xml.append(self._lyric(verse, text))
             xml.append("</note>")
             self.w("".join(xml))
+
+    def _slur_notation(self, e: Event) -> str:
+        out = []
+        # stops first, so a note that ends one slur and starts the next can reuse the number
+        for kind, sid, place in sorted(e.slurs, key=lambda s: not s[0].startswith("stop")):
+            if kind == "stop":
+                num = self.slur_number.pop(sid, None)
+            elif kind == "stop-open":
+                pending = self.slur_open.get(e.staff) or []
+                num = pending.pop(0) if pending else None
+            else:
+                used = set(self.slur_number.values()) | {n for ns in self.slur_open.values() for n in ns}
+                num = next((n for n in range(1, 7) if n not in used), None)
+                if num is None:  # slurs that never ended (a measure was replaced): start over
+                    self.slur_number.clear()
+                    self.slur_open.clear()
+                    num = 1
+                if kind == "start":
+                    self.slur_number[sid] = num
+                else:
+                    self.slur_open.setdefault(e.staff, []).append(num)
+                out.append(f'<slur type="start" number="{num}" placement="{place}"/>')
+                continue
+            if num is not None:
+                out.append(f'<slur type="stop" number="{num}"/>')
+        return "".join(out)
 
     def _lyric(self, verse: int, text: str) -> str:
         """A syllable; a trailing '-' means the word goes on with the next note."""

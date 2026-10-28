@@ -6,6 +6,7 @@ between two staff lines; most tolerances are expressed in it.
 
 from __future__ import annotations
 
+import itertools
 import re
 
 from dataclasses import dataclass, field
@@ -37,6 +38,8 @@ HEAD_VALUE = {
     "head.slash.half": Fraction(2),
     "head.slash.whole": Fraction(4),
 }
+_SLUR_IDS = itertools.count(1)
+
 REST_VALUE = {
     "rest.breve": Fraction(8),
     "rest.whole": Fraction(4),
@@ -92,6 +95,8 @@ class Chord:
     beams: list[int] = field(default_factory=list)  # ids of beams attached
     voice: int = 1
     articulations: list[str] = field(default_factory=list)
+    slurs: list = field(default_factory=list)  # ("start" | "stop" | "start-open" | "stop-open", id, placement)
+    ottava: int = 0  # octaves the notes sound above (+) or below (-) where they are written
 
     @property
     def top(self) -> float:
@@ -173,6 +178,7 @@ class SystemReader:
     def __init__(self, pc: PageContent, system: System, carry: dict[int, dict], page_staves: list[Staff] | None = None):
         self.pc = pc
         self.gap_rests: set[int] = set()
+        self.tie_curves: set[int] = set()
         self.system = system
         # staves of the other systems on the page, so that symbols near them are left alone
         own = {id(s) for s in system.staves}
@@ -384,6 +390,8 @@ class SystemReader:
         repeat_end, repeat_start = self._repeats(st, glyphs, barlines, used_ids)
         chords, rests = self._events(st, glyphs, stems, beams, normal, used_ids)
         self._ties(st, chords)
+        self._slurs(st, chords)
+        ottava_dirs = self._ottavas(st, glyphs, sc.texts, chords)
         self._tuplets(st, sc.texts, glyphs, chords, rests, beams, segs, used_ids)
 
         # mid-staff clef / key / time changes keyed by x
@@ -412,7 +420,7 @@ class SystemReader:
         # ---- accidentals (after key signatures are consumed)
         self._accidentals(st, [a for a in accs if id(a) not in used_ids], chords)
 
-        directions = self._directions(st, glyphs, sc.texts)
+        directions = self._directions(st, glyphs, sc.texts) + self._wedges(st) + ottava_dirs
 
         for mi, (a, b) in enumerate(regions):
             m = Measure(number=0)
@@ -473,6 +481,7 @@ class SystemReader:
         while len(sc.measures) > 1 and not sc.measures[-1].events and regions[-1][1] > st.x1:
             sc.measures.pop()
         sc.header_end = x_after
+        self._voltas(st, sc.measures, regions)
         self._lyrics(st, sc)
         # text directions last: upright text above a staff may be the lyrics of the staff above
         for d in self._text_directions(st, [t for t in sc.texts if id(t) not in self.lyric_texts], sc.glyphs, bar_lines_x, sc.header_end):
@@ -480,6 +489,33 @@ class SystemReader:
                 if a - 0.2 * sp <= d.x < b - 0.2 * sp or m is sc.measures[0] and d.x < a:
                     m.directions.append(d)
                     break
+
+    def _voltas(self, st: Staff, measures, regions) -> None:
+        """First and second endings: "1." under a bracket line above the system, for every staff."""
+        sp = st.space
+        top = min(o.top for o in self.system.staves)
+        for t in self.pc.texts:
+            word = t.text.strip()
+            if not re.fullmatch(r"\d+\.?(\s*[-–,+]\s*\d+\.?)*", word) or not word.endswith("."):
+                continue
+            if not (top - 8 * sp < t.origin_y < top) or t.x0 < st.x0 or t.x0 > st.x1:
+                continue
+            line = [sg for sg in self.pc.segments if abs(sg.y0 - sg.y1) < 0.1 * sp and abs(sg.x1 - sg.x0) > 2 * sp
+                    and -1.0 * sp < t.y0 - sg.y0 < 3.0 * sp and abs(min(sg.x0, sg.x1) - t.x0) < 3 * sp]
+            if not line:
+                continue
+            sg = max(line, key=lambda sg: abs(sg.x1 - sg.x0))
+            x0, x1, y = min(sg.x0, sg.x1), max(sg.x0, sg.x1), sg.y0
+            hook = any(abs(v.x0 - v.x1) < 0.1 * sp and abs(v.x0 - x1) < 0.4 * sp and abs(min(v.y0, v.y1) - y) < 0.4 * sp
+                       for v in self.pc.segments)
+            numbers = ",".join(str(n) for n in range(int(re.findall(r"\d+", word)[0]),
+                                                       int(re.findall(r"\d+", word)[-1]) + 1)) \
+                if re.search(r"[-–]", word) else ",".join(re.findall(r"\d+", word))
+            idx = [i for i, (a, b) in enumerate(regions[:len(measures)]) if a < x1 - sp and b > x0 + sp]
+            if not idx:
+                continue
+            measures[idx[0]].ending_start = (numbers, word)
+            measures[idx[-1]].ending_stop = (numbers, "stop" if hook else "discontinue")
 
     def _lyrics(self, st: Staff, sc: StaffContent) -> None:
         """Lyrics: lines of upright text under the staff whose syllables sit under its notes
@@ -496,10 +532,10 @@ class SystemReader:
         accepted: list[list[tuple]] = []
         # above the staff: only text no other staff has taken as its lyrics, close to the notes
         for line in self._text_lines(st, lambda y: st.top - 6 * sp < y < st.top - 0.8 * sp):
-            if high - line[0][0] > 6.5 * sp:
+            if high - line[0][0] > 6.5 * sp or _not_lyrics(line):
                 continue
             matched, n = self._match_syllables(line, notes, sp)
-            if len(matched) >= 2 and len(matched) >= 0.7 * n:
+            if len(matched) >= 3 and len(matched) >= 0.7 * n:
                 accepted.append(matched)
                 self.lyric_texts.update(tok[4] for tok in line)
         # below the staff: the first verse close under the staff (or its lowest notes),
@@ -507,7 +543,7 @@ class SystemReader:
         last_y = None
         for line in self._text_lines(st, lambda y: st.bottom + 0.8 * sp < y < limit):
             y = line[0][0]
-            if y - (low if last_y is None else last_y) > (6.5 if last_y is None else 3.5) * sp:
+            if y - (low if last_y is None else last_y) > (6.5 if last_y is None else 3.5) * sp or _not_lyrics(line):
                 continue
             matched, n = self._match_syllables(line, notes, sp)
             # a single syllable counts only right under an accepted verse (end of a second verse)
@@ -787,13 +823,162 @@ class SystemReader:
                 a, b = min(pairs, key=lambda p: abs(p[0][0].glyph.y - ymid))
                 a[0].tie_start = True
                 b[0].tie_stop = True
+                self.tie_curves.add(id(cv))
                 continue
             if left and cv.x1 > st.x1 - 2.5 * sp:
                 h = min(left, key=lambda p: abs(p[0].glyph.y - ymid))[0]
                 h.tie_start = True
+                self.tie_curves.add(id(cv))
             elif right and cv.x0 < st.x0 + 8 * sp and not left:
                 h = min(right, key=lambda p: abs(p[0].glyph.y - ymid))[0]
                 h.tie_stop = True
+                self.tie_curves.add(id(cv))
+
+    def _ottavas(self, st: Staff, glyphs, texts, chords) -> list[Direction]:
+        """8va / 8vb / 15ma marks with their dashed lines: the notes under them sound
+        an octave (two) away from where they are written."""
+        sp = st.space
+        marks = []
+        for g in glyphs:
+            if g.name.startswith("ottava."):
+                marks.append((g.x, g.x1, g.y, g.name.split(".")[1]))
+        for t in texts:
+            w = t.text.strip().replace("(", "").replace(")", "")
+            if w in ("8va", "8", "8vb", "15ma", "15mb", "8va bassa") and (t.italic or w != "8"):
+                kind = {"8va": "8", "8": "8", "15ma": "15"}.get(w, "8vb" if "8" in w else "15mb")
+                marks.append((t.x0, t.x1, t.origin_y, kind))
+        marks.sort()
+        out: list[Direction] = []
+        last_end = -1.0
+        for x0, x1, y, kind in marks:
+            if x0 < last_end:
+                continue  # the "va" part of a mark already taken
+            below = kind.endswith("b")
+            if below != (y > st.middle):
+                continue
+            # dashed line from the mark to the right, ending in a hook
+            end = x1
+            for sg in sorted((sg for sg in self.pc.segments if abs(sg.y0 - sg.y1) < 0.1 * sp
+                              and abs(sg.y0 - y) < 1.5 * sp and sg.x1 > x1), key=lambda sg: min(sg.x0, sg.x1)):
+                if min(sg.x0, sg.x1) - end > 2.5 * sp:
+                    break
+                end = max(end, sg.x0, sg.x1)
+            if end - x1 < sp:
+                end = x1 + 3 * sp
+            last_end = end
+            shift = (2 if kind.startswith("15") else 1) * (-1 if below else 1)
+            hit = False
+            for c in chords:
+                if x0 - 1.0 * sp <= c.x <= end + 0.5 * sp:
+                    c.ottava = shift
+                    hit = True
+            if not hit:
+                continue
+            size = 15 if abs(shift) == 2 else 8
+            out.append(Direction(x=x0, staff=1, kind="octave-shift", text=f"{'up' if below else 'down'} {size}",
+                                 above=not below))
+            out.append(Direction(x=end, staff=1, kind="octave-shift", text=f"stop {size}", above=not below))
+        return out
+
+    def _wedges(self, st: Staff) -> list[Direction]:
+        """Hairpins: two thin lines meeting at a point and opening up to the other end."""
+        sp = st.space
+        staves = self.system.staves + self.other_staves
+        lines = []
+        for sg in self.pc.segments:
+            x0, y0, x1, y1 = sg.x0, sg.y0, sg.x1, sg.y1
+            if x1 < x0:
+                x0, y0, x1, y1 = x1, y1, x0, y0
+            w = x1 - x0
+            if w < 2 * sp or abs(y1 - y0) > 0.25 * w or abs(y1 - y0) < 0.05 * sp or sg.width > 0.3 * sp:
+                continue
+            if x1 < st.x0 or x0 > st.x1:
+                continue
+            ym = (y0 + y1) / 2
+            if not (st.top - 7 * sp < ym < st.bottom + 7 * sp) or st.distance(ym) < 0.5 * sp:
+                continue
+            if min(staves, key=lambda o: o.distance(ym)) is not st:
+                continue
+            lines.append((x0, y0, x1, y1))
+        out: list[Direction] = []
+        used = set()
+        for i, a in enumerate(lines):
+            for j in range(i + 1, len(lines)):
+                b = lines[j]
+                if i in used or j in used:
+                    continue
+                if abs(a[0] - b[0]) > 0.4 * sp or abs(a[2] - b[2]) > 0.4 * sp:
+                    continue
+                gap_l, gap_r = abs(a[1] - b[1]), abs(a[3] - b[3])
+                if gap_l < 0.3 * sp and 0.5 * sp < gap_r < 2.5 * sp:
+                    kind = "crescendo"
+                elif gap_r < 0.3 * sp and 0.5 * sp < gap_l < 2.5 * sp:
+                    kind = "diminuendo"
+                else:
+                    continue
+                used |= {i, j}
+                ym = (a[1] + a[3] + b[1] + b[3]) / 4
+                above = ym < st.top
+                start = Direction(x=min(a[0], b[0]), staff=1, kind="wedge", text=kind, above=above)
+                stop = Direction(x=max(a[2], b[2]), staff=1, kind="wedge", text="stop", above=above)
+                out += [start, stop]
+        return out
+
+    def _slurs(self, st: Staff, chords: list[Chord]) -> None:
+        """Slurs and phrasing arcs: curves that are not ties, from the note at one end to the note
+        at the other; open at the system edge when they go on in the next system."""
+        sp = st.space
+        notes = [c for c in chords]
+        if not notes:
+            return
+        seen = set()
+        first_x = min(c.x for c in notes)
+        last_x = max(c.x for c in notes)
+
+        def extent(c):
+            ys = [c.top, c.bottom] + ([c.tip] if c.tip is not None else [])
+            return min(ys), max(ys)
+
+        def owner(px, py, side):
+            best = None
+            for c in notes:
+                dx = (px - c.x) if side == "left" else (c.x - px)
+                if not -1.6 * sp <= dx <= 2.2 * sp:
+                    continue
+                lo, hi = extent(c)
+                dy = 0.0 if lo <= py <= hi else min(abs(py - lo), abs(py - hi))
+                if dy > 2.5 * sp:
+                    continue
+                score = abs(dx) / sp + dy / sp
+                if best is None or score < best[0]:
+                    best = (score, c)
+            return best[1] if best else None
+
+        for cv in self.pc.curves:
+            if id(cv) in self.tie_curves:
+                continue
+            key = (round(cv.x0), round(cv.y0), round(cv.x1), round(cv.y1))
+            if key in seen:
+                continue
+            seen.add(key)
+            if cv.x1 < st.x0 or cv.x0 > st.x1 or cv.x1 - cv.x0 < 1.2 * sp:
+                continue
+            (lx, ly), (rx, ry) = sorted([cv.start, cv.end])
+            if not (st.top - 6 * sp < ly < st.bottom + 6 * sp and st.top - 6 * sp < ry < st.bottom + 6 * sp):
+                continue
+            # the arc bulges away from the notes: above when its top is above both ends
+            above = cv.y0 < min(ly, ry) - 0.2 * sp
+            place = "above" if above else "below"
+            a = owner(lx, ly, "left")
+            b = owner(rx, ry, "right")
+            if a is not None and b is not None and a is not b and b.x > a.x:
+                sid = next(_SLUR_IDS)
+                a.slurs.append(("start", sid, place))
+                b.slurs.append(("stop", sid, place))
+            elif a is not None and b is None and rx > last_x + 0.5 * sp and rx > st.x1 - 4 * sp:
+                a.slurs.append(("start-open", 0, place))
+            elif b is not None and a is None and lx < first_x - 0.5 * sp and lx < st.x0 + 12 * sp:
+                b.slurs.append(("stop-open", 0, place))
 
     @staticmethod
     def _repeats(st: Staff, glyphs, barlines, used_ids: set[int]) -> tuple[list[float], list[float]]:
@@ -1216,7 +1401,7 @@ class SystemReader:
                 ref = _clef_reference(cur_clef)
                 pitches = []
                 for h in sorted(it.heads, key=lambda h: -h.pos):
-                    dia = ref + h.pos
+                    dia = ref + h.pos + 7 * it.ottava
                     octave, si = divmod(dia, 7)
                     step = STEPS[si]
                     if h.accidental is not None:
@@ -1233,7 +1418,7 @@ class SystemReader:
                 ev = Event(
                     x=it.x, duration=_dur(it.value, it.dots, it.tuplet), pitches=pitches, voice=it.voice,
                     base=it.value, dots=it.dots, tuplet=it.tuplet, grace=it.grace, stem=it.direction,
-                    articulations=list(it.articulations),
+                    articulations=list(it.articulations), slurs=list(it.slurs),
                     notehead="slash" if any(h.glyph.name.startswith("head.slash") for h in it.heads) else None,
                 )
                 if it.grace:
@@ -1269,6 +1454,12 @@ class SystemReader:
 def _median(vals):
     vals = sorted(vals)
     return vals[len(vals) // 2] if vals else None
+
+
+def _not_lyrics(line) -> bool:
+    """Signs like "+" or "=" mean a heading ("Vers 1 + 2"), not sung text."""
+    return any(not any(ch.isalpha() for ch in tok[3]) and tok[3] not in ("-", "_", "–", "—")
+               and not re.fullmatch(r"\d+\.?\)?|[,.;:!?'’]", tok[3]) for tok in line)
 
 
 def _hidden_rest(x: float, duration: Fraction, voice: int) -> Event:

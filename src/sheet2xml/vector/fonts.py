@@ -85,6 +85,8 @@ SONATA_DYN: dict[str, str] = {
 
 # --- SMuFL mapping (code point -> name) ---
 SMUFL: dict[int, str] = {
+    0xE510: "ottava.8", 0xE511: "ottava.8", 0xE512: "ottava.8vb", 0xE51C: "ottava.8vb",
+    0xE514: "ottava.15", 0xE515: "ottava.15", 0xE516: "ottava.15mb", 0xE51D: "ottava.15mb",
     0xE050: "clef.G", 0xE052: "clef.G8vb", 0xE053: "clef.G8va",
     0xE07A: "clef.G", 0xE062: "clef.F", 0xE064: "clef.F8vb", 0xE07C: "clef.F",
     0xE05C: "clef.C", 0xE07B: "clef.C", 0xE069: "clef.perc", 0xE06A: "clef.perc",
@@ -165,6 +167,7 @@ def normalize_char(ch: str) -> str:
 # Sibelius' "OpusSpecial" fonts reuse a few code positions differently.
 SONATA_SPECIAL: dict[str, str] = {
     "™": "dot",
+    "“": "ottava.8",  # followed by "”" (va)
     "{": "brace",
 }
 

@@ -113,3 +113,24 @@ def test_rehearsal_letters():
         m.directions.append(Direction(x=0, staff=1, kind="harmony", text=letter))
     _rehearsal_letters(part)
     assert all(d.kind == "rehearsal" for m in part.measures for d in m.directions)
+
+
+def test_slurs_endings_and_hairpins():
+    from sheet2xml.model import Direction
+
+    def note(x, slurs):
+        return Event(x=x, duration=Fraction(2), base=Fraction(2), pitches=[Pitch(step="C", octave=5)], slurs=slurs)
+
+    m1 = Measure(number=1, time=(4, 4), key=0, expected=Fraction(4),
+                 events=[note(0, [("start", 1, "above")]), note(10, [])], ending_start=("1", "1."))
+    m1.directions = [Direction(x=1, staff=1, kind="wedge", text="crescendo"),
+                     Direction(x=9, staff=1, kind="wedge", text="stop")]
+    m2 = Measure(number=2, expected=Fraction(4), events=[note(0, [("stop", 1, "above")]), note(10, [])],
+                 ending_stop=("1", "stop"))
+    xml = to_musicxml(Score(parts=[Part(name="V", measures=[m1, m2])]))
+    assert '<slur type="start" number="1" placement="above"/>' in xml
+    assert '<slur type="stop" number="1"/>' in xml
+    assert '<ending number="1" type="start">1.</ending>' in xml
+    assert '<ending number="1" type="stop"/>' in xml
+    # the hairpin opens at the first note and closes before the second
+    assert xml.index('<wedge type="crescendo"/>') < xml.index("<duration>") < xml.index('<wedge type="stop"/>')

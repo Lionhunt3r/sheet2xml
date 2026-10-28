@@ -36,6 +36,7 @@ class Event:
     notehead: str | None = None  # "slash" for rhythm slashes
     lyrics: list[str] = field(default_factory=list)  # one syllable per verse ("" = none); "-" at the end: word goes on
     hidden: bool = False  # filler rest added to complete a voice
+    slurs: list = field(default_factory=list)  # ("start" | "stop" | "start-open" | "stop-open", id, placement)
 
     @property
     def is_rest(self) -> bool:
@@ -70,6 +71,8 @@ class Measure:
     directions: list[Direction] = field(default_factory=list)
     barline: str | None = None  # right barline: "final", "double", "repeat-end"
     repeat_start: bool = False  # left barline opens a repeat
+    ending_start: tuple[str, str] | None = None  # volta starting here: (numbers "1,2", printed text)
+    ending_stop: tuple[str, str] | None = None  # volta ending here: (numbers, "stop" | "discontinue")
     expected: Fraction | None = None  # length implied by the time signature
     rest_measures: int = 1  # >1 for a multi-measure rest placeholder
     partial: bool = False  # deliberately short: pickup, end of movement, split at a repeat

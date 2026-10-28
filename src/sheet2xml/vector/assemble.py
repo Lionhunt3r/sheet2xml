@@ -515,6 +515,7 @@ def _merge_staff(dst: Measure, src: Measure, staff: int) -> None:
         dst.expected = src.expected
         dst.barline = src.barline
         dst.repeat_start = src.repeat_start
+        dst.ending_start, dst.ending_stop = src.ending_start, src.ending_stop
         dst.rest_measures = src.rest_measures
         for attr in ("_time", "_time_symbol", "_key"):
             if hasattr(src, attr):
@@ -538,8 +539,10 @@ def _expand(part: Part, m: Measure, count: int) -> None:
             mm.directions = m.directions
         if k == 0:
             mm.repeat_start = m.repeat_start
+            mm.ending_start = m.ending_start
         if k == count - 1:
             mm.barline = m.barline
+            mm.ending_stop = m.ending_stop
         for s in range(1, part.staves + 1):
             mm.events.append(Event(x=0, duration=m.expected or Fraction(4), staff=s, base=Fraction(4),
                                    full_measure=True, voice=1 + 4 * (s - 1)))
@@ -582,9 +585,11 @@ def _fill_metadata(score: Score, pages: list[PageContent], reads: list[SystemRea
             target = last  # continuation of the previous line
         elif re.match(r"(text|worte|dichtung|lyrics|words|deutsch|übers|übertr)", low):
             target = lyricist
+        elif re.match(r"(melodie|musik|music|komp|weise|composer)", low):
+            target = composer
         elif re.match(r"(arr|aran|bearb|satz|orch|setting)", low):
             target = arranger
-        elif t.x1 > page.width * 0.65:
+        elif t.x1 > page.width * 0.65 and _looks_like_name(t):
             target = composer
         else:
             continue
@@ -593,6 +598,14 @@ def _fill_metadata(score: Score, pages: list[PageContent], reads: list[SystemRea
     score.composer = "\n".join(composer)
     score.lyricist = "\n".join(lyricist)
     score.arranger = "\n".join(arranger)
+
+
+def _looks_like_name(t) -> bool:
+    """A composer credit, not a motto or Bible verse (italic, a sentence, "Spr. 24,11") or a tempo mark."""
+    text = t.text.strip()
+    if t.italic or len(text) > 45 or re.search(r"[!?]|\d+\s*,\s*\d+|\b(tempo|rit|rall|accel)", text, re.I):
+        return False
+    return not text.rstrip().endswith((",", ";"))
 
 
 def _single_part_name(score: Score, parts: list[Part], pages, reads) -> None:
