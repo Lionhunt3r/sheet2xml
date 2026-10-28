@@ -38,7 +38,7 @@ Einstellungen über Umgebungsvariablen (z. B. in einer `.env`-Datei neben `docke
 
 **TrueNAS SCALE:** Jeder Push auf `main` baut das Image automatisch als `ghcr.io/lionhunt3r/sheet2xml:latest`.
 Unter *Apps → Discover Apps → Custom App* dieses Image eintragen, Container-Port 8000 auf einen freien Port legen und
-die Umgebungsvariablen unten nach Bedarf setzen. Ist das Paket auf GitHub privat, vorher unter
+die Umgebungsvariablen oben nach Bedarf setzen. Ist das Paket auf GitHub privat, vorher unter
 *Package settings → Change visibility* öffentlich machen oder in TrueNAS Zugangsdaten für `ghcr.io` hinterlegen.
 Alternativ per Shell im geklonten Ordner `docker compose up -d --build`.
 

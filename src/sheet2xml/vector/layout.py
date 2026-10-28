@@ -208,7 +208,7 @@ def find_systems(pc: PageContent, staves: list[Staff]) -> list[System]:
 
     for sy in systems:
         sy.barlines = _system_barlines(sy, verticals, pc.polygons, heads)
-    systems = _merge_aligned(systems)
+    systems = _merge_aligned(systems, pc)
     for sy in systems:
         for x, y0, y1 in brace_spans:
             if x > sy.x0 + sp_med:
@@ -228,7 +228,19 @@ def _same_barlines(a: System, b: System, tol: float) -> bool:
     return common >= max(2, 0.6 * max(len(xa), len(xb)))
 
 
-def _merge_aligned(systems: list[System]) -> list[System]:
+def _starts_system(sy: System, pc: PageContent | None) -> bool:
+    """A measure number above the first staff at the left edge marks a new system."""
+    if pc is None:
+        return False
+    st = sy.staves[0]
+    sp = st.space
+    for t in pc.texts:
+        if t.text.strip().isdigit() and st.top - 5 * sp < t.y1 <= st.top + 0.5 * sp and abs(t.x0 - sy.x0) < 3 * sp:
+            return True
+    return False
+
+
+def _merge_aligned(systems: list[System], pc: PageContent | None = None) -> list[System]:
     """Join staff groups whose barlines line up exactly: some programs (MuseScore)
     break barlines between instrument groups, so one system shows up as several."""
     if len(systems) < 2:
@@ -253,7 +265,7 @@ def _merge_aligned(systems: list[System]) -> list[System]:
             (_same_barlines(prev, sy, tol) and (typical is None or gap <= 2.0 * typical))
             or (same_end and close)
         )
-        if aligned and multi:
+        if aligned and multi and not _starts_system(sy, pc):
             prev.staves.extend(sy.staves)
             merged: list[tuple[float, float, str]] = []
             for b in sorted(prev.barlines + sy.barlines):

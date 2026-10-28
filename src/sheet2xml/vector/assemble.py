@@ -150,34 +150,56 @@ def read_vector_pdf(path: str) -> Score:
 
     _fill_metadata(score, pages, reads)
 
-    parts: list[Part] = []
-    part_carry: list[dict] = []
+    # instrument groups of every system; the system showing the most groups
+    # (usually the first, but not when the opening omits e.g. choir and piano)
+    # defines the parts, the others are aligned to it
+    layouts = []
     for sr in reads:
         reader: SystemReader = sr._reader  # type: ignore[attr-defined]
         contents_pre = reader._assign()
-        # read staves one by one so the clef/key/time context follows the instrument
-        groups, labels = _group_staves(contents_pre, sr.system, sr.page)
-        mapping = _map_groups(parts, groups, labels, sr is reads[0])
+        layouts.append(_group_staves(contents_pre, sr.system, sr.page))
+    ref = max(range(len(reads)), key=lambda k: (len(layouts[k][0]), -k))
+    parts: list[Part] = [
+        Part(name=lb or f"Stimme {i + 1}", staves=len(g)) for i, (g, lb) in enumerate(zip(*layouts[ref]))
+    ]
+    mappings: list[list[int]] = [[] for _ in reads]
+    mappings[ref] = list(range(len(parts)))
+    # align the other systems, fullest first; instruments that the reference
+    # system does not show become new parts at their place in the order
+    for k in sorted(range(len(reads)), key=lambda k: (-len(layouts[k][0]), k)):
+        if k == ref:
+            continue
+        groups, labels = layouts[k]
+        mapping = _map_groups(parts, groups, labels, False)
+        for gi, grp in enumerate(groups):
+            if mapping[gi] is not None:
+                continue
+            lo = max([x for x in mapping[:gi] if x is not None], default=-1)
+            hi = min([x for x in mapping[gi + 1:] if x is not None], default=len(parts))
+            free = [j for j in range(lo + 1, hi) if j not in mapping and parts[j].staves == len(grp)]
+            fits = [j for j in free if not labels[gi] or _label_score(labels[gi], parts[j].name) > 0.3]
+            if fits:
+                mapping[gi] = fits[0]
+                continue
+            pos = lo + 1
+            parts.insert(pos, Part(name=labels[gi] or f"Stimme {pos + 1}", staves=len(grp)))
+            for other in mappings:
+                other[:] = [x + 1 if x >= pos else x for x in other]
+            mapping = [x + 1 if x is not None and x >= pos else x for x in mapping]
+            mapping[gi] = pos
+        mappings[k] = mapping  # type: ignore[assignment]
+
+    part_carry: list[dict] = [{} for _ in parts]
+    seen_labels: list[list[str]] = [[] for _ in parts]
+    for k, sr in enumerate(reads):
+        reader = sr._reader  # type: ignore[attr-defined]
+        groups, labels = layouts[k]
+        mapping = mappings[k]
         for gi, grp in enumerate(groups):
             pi = mapping[gi]
-            if pi is None and parts and sr is not reads[0]:
-                used = {x for x in mapping if x is not None}
-                free = [k for k in range(len(parts)) if k not in used]
-                if not free:
-                    score.warnings.append(f"Notenzeile '{labels[gi]}' konnte keiner Stimme zugeordnet werden")
-                    mapping[gi] = -1
-                    continue
-                lo = max([x for x in mapping[:gi] if x is not None and x >= 0], default=-1)
-                pi = min(free, key=lambda k: (k <= lo, abs(k - lo - 1)))
-                mapping[gi] = pi
-            if pi is None:
-                parts.append(Part(name=labels[gi] or f"Stimme {len(parts) + 1}", staves=len(grp)))
-                part_carry.append({})
-                pi = len(parts) - 1
-                mapping[gi] = pi
+            if labels[gi]:
+                seen_labels[pi].append(labels[gi])
             part = parts[pi]
-            if labels[gi] and not part.abbreviation and labels[gi] != part.name:
-                part.abbreviation = labels[gi]
             part.staves = max(part.staves, len(grp))
             for si, sc in enumerate(grp):
                 carry = part_carry[pi].setdefault(si, {})
@@ -186,6 +208,15 @@ def read_vector_pdf(path: str) -> Score:
         sr.groups = groups
         sr.labels = labels
         sr._mapping = mapping  # type: ignore[attr-defined]
+
+    # full name from the first labelled system, the shortest other label as abbreviation
+    for part, seen in zip(parts, seen_labels):
+        if not seen:
+            continue
+        part.name = seen[0]
+        others = [lb for lb in seen if _norm(lb) != _norm(part.name)]
+        if others:
+            part.abbreviation = min(others, key=len)
 
     _single_part_name(score, parts, pages, reads)
     for p in parts:
@@ -235,7 +266,11 @@ def _map_groups(parts: list[Part], groups, labels, first: bool) -> list[int | No
     def sim(i: int, j: int) -> float:
         lb = labels[i]
         p = parts[j]
-        s = max(_label_score(lb, p.name), _label_score(lb, p.abbreviation or "")) if lb else 0.6
+        s = (
+            max(_label_score(lb, p.name), _label_score(p.name, lb), _label_score(lb, p.abbreviation or ""))
+            if lb
+            else 0.6
+        )
         if len(groups[i]) != p.staves:
             s -= 1.0
         return s
