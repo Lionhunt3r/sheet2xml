@@ -38,6 +38,62 @@ def _divisions(score: Score) -> int:
     return den
 
 
+HARMONY_KINDS = [  # suffix (after the root and its accidental) -> MusicXML kind, longest first
+    ("maj9", "major-ninth"), ("maj7", "major-seventh"), ("M7", "major-seventh"), ("Δ7", "major-seventh"),
+    ("Δ", "major-seventh"), ("maj", "major"), ("M", "major"), ("m7b5", "half-diminished"), ("min7b5", "half-diminished"), ("ø", "half-diminished"),
+    ("dim7", "diminished-seventh"), ("°7", "diminished-seventh"), ("dim", "diminished"), ("°", "diminished"),
+    ("min9", "minor-ninth"), ("m9", "minor-ninth"), ("min7", "minor-seventh"), ("m7", "minor-seventh"),
+    ("-7", "minor-seventh"), ("min6", "minor-sixth"), ("m6", "minor-sixth"), ("mmaj7", "major-minor"),
+    ("min", "minor"), ("m", "minor"), ("-", "minor"), ("aug", "augmented"), ("+", "augmented"),
+    ("sus4", "suspended-fourth"), ("sus2", "suspended-second"), ("sus", "suspended-fourth"),
+    ("13", "dominant-13th"), ("11", "dominant-11th"), ("9", "dominant-ninth"), ("7", "dominant"),
+    ("6", "major-sixth"), ("5", "power"), ("", "major"),
+]
+STEP_ALTER = {"#": 1, "♯": 1, "b": -1, "♭": -1, "es": -1, "s": -1, "is": 1}
+
+
+def _root(text: str) -> tuple[str, int, str] | None:
+    """Split "Bb7" into ("B", -1, "7"); German H is B."""
+    if not text or text[0].upper() not in "ABCDEFGH":
+        return None
+    step = text[0].upper()
+    rest = text[1:]
+    alter = 0
+    for acc in ("#", "♯", "b", "♭"):
+        if rest.startswith(acc):
+            alter, rest = STEP_ALTER[acc], rest[1:]
+            break
+    return ("B" if step == "H" else step), alter, rest
+
+
+def harmony_xml(text: str) -> str | None:
+    t = text.strip().replace(" ", "")
+    if t.lower().rstrip(".") in ("n.c", "nc", "n.c.", "n"):
+        return "<harmony><root><root-step text=\"\">C</root-step></root><kind text=\"N.C.\">none</kind></harmony>"
+    bass = None
+    if "/" in t:
+        t, b = t.split("/", 1)
+        bass = _root(b)
+    r = _root(t)
+    if r is None:
+        return None
+    step, alter, suffix = r
+    sfx, kind = next((s, k) for s, k in HARMONY_KINDS if suffix.startswith(s))
+    if kind == "major" and suffix != sfx:
+        kind = "other"  # add9, alt, ...: MusicXML keeps the printed text
+    xml = [f"<harmony><root><root-step>{step}</root-step>"]
+    if alter:
+        xml.append(f"<root-alter>{alter}</root-alter>")
+    xml.append(f'</root><kind text="{escape(suffix, {chr(34): "&quot;"})}">{kind}</kind>')
+    if bass:
+        xml.append(f"<bass><bass-step>{bass[0]}</bass-step>")
+        if bass[1]:
+            xml.append(f"<bass-alter>{bass[1]}</bass-alter>")
+        xml.append("</bass>")
+    xml.append("</harmony>")
+    return "".join(xml)
+
+
 def _is_power_of_two(fr: Fraction) -> bool:
     if fr <= 0:
         return False
@@ -214,13 +270,20 @@ class _Writer:
 
     def direction(self, d, staves: int) -> None:
         place = "above" if d.above else "below"
+        staff = f"<staff>{d.staff}</staff>" if staves > 1 else ""
+        if d.kind == "harmony":
+            xml = harmony_xml(d.text)
+            if xml:
+                self.w("      " + xml.replace("</harmony>", f"{staff}</harmony>"))
+                return
         if d.kind == "dynamic" and d.text in DYNAMICS:
             body = f"<dynamics><{d.text}/></dynamics>"
+        elif d.kind == "rehearsal":
+            body = f'<rehearsal enclosure="square">{escape(d.text)}</rehearsal>'
         elif d.kind == "tempo":
             body = f'<words font-weight="bold">{escape(d.text)}</words>'
         else:
             body = f"<words>{escape(d.text)}</words>"
-        staff = f"<staff>{d.staff}</staff>" if staves > 1 else ""
         self.w(f'      <direction placement="{place}"><direction-type>{body}</direction-type>{staff}</direction>')
 
     def event(self, e: Event, staves: int, tstart: bool, tstop: bool) -> None:

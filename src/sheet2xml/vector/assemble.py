@@ -135,7 +135,6 @@ def read_vector_pdf(path: str) -> Score:
     pages = extract(path)
     score = Score(source="vector")
     reads: list[SystemRead] = []
-    carry_by_part: dict[int, dict] = {}
     for pc in pages:
         staves = find_staves(pc)
         if not staves:
@@ -329,7 +328,6 @@ def _map_groups(parts: list[Part], groups, labels, first: bool) -> list[int | No
 
 def _stitch(score: Score, parts: list[Part], reads: list[SystemRead]) -> None:
     """Concatenate measures system by system; fill parts missing from a system."""
-    number = 1
     last_time: tuple[int, int] = (4, 4)
     for sr in reads:
         mapping = sr._mapping  # type: ignore[attr-defined]
@@ -381,6 +379,9 @@ def _stitch(score: Score, parts: list[Part], reads: list[SystemRead]) -> None:
                 m._filler = True  # type: ignore[attr-defined]
                 _expand(part, m, expansions[mi])
     _fill_hidden_staves(parts)
+    for part in parts:
+        _rehearsal_letters(part)
+        _lone_chord_names(part)
     # number measures, compute time/key changes per part
     for part in parts:
         prev_time = None
@@ -411,6 +412,41 @@ def _stitch(score: Score, parts: list[Part], reads: list[SystemRead]) -> None:
                 m = Measure(number=len(p.measures) + 1, expected=exp)
                 m.events.append(Event(x=0, duration=exp, base=Fraction(4), full_measure=True))
                 p.measures.append(m)
+
+
+def _rehearsal_letters(part: Part) -> None:
+    """Single letters running A, B, C, ... through a part are rehearsal marks, not chords."""
+    marks = []
+    for m in part.measures:
+        seen = set()
+        for d in sorted(m.directions, key=lambda d: d.x):
+            if d.kind in ("harmony", "rehearsal") and len(d.text) == 1 and d.text not in seen:
+                seen.add(d.text)
+                marks.append(d)
+    letters = [ord(d.text) for d in marks]
+    if len(letters) >= 2 and all(b == a + 1 for a, b in zip(letters, letters[1:])) \
+            and (len(letters) >= 3 or letters[0] == ord("A")):
+        for d in marks:
+            d.kind = "rehearsal"
+    for m in part.measures:  # the same mark read on both staves of a piano part
+        seen = set()
+        keep = []
+        for d in m.directions:
+            if d.kind == "rehearsal":
+                if d.text in seen:
+                    continue
+                seen.add(d.text)
+            keep.append(d)
+        m.directions = keep
+
+
+def _lone_chord_names(part: Part) -> None:
+    """A couple of note names in a part without chord symbols (harp pedals, "in Eb") stay text."""
+    chords = [d for m in part.measures for d in m.directions if d.kind == "harmony"]
+    if 0 < len(chords) < 3:
+        for d in chords:
+            d.kind = "words"
+            d.text = re.sub(r"(?<=[A-H])b", "♭", d.text).replace("#", "♯")
 
 
 def _fill_hidden_staves(parts: list[Part]) -> None:

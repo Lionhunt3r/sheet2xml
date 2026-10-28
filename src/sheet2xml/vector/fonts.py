@@ -110,7 +110,7 @@ SMUFL: dict[int, str] = {
     0xE610: "art.downbow", 0xE611: "art.downbow", 0xE612: "art.upbow", 0xE613: "art.upbow",
     0xE566: "orn.trill", 0xE567: "orn.turn", 0xE56C: "orn.mordent", 0xE56D: "orn.mordent",
     0xE534: "dyn.fp", 0xE535: "dyn.fz", 0xE537: "dyn.sfp", 0xE538: "dyn.sfpp",
-    0xE000: "brace", 0xE566: "orn.trill",
+    0xE000: "brace",
     0xE520: "dyn.p", 0xE521: "dyn.m", 0xE522: "dyn.f", 0xE523: "dyn.r", 0xE524: "dyn.s",
     0xE525: "dyn.z", 0xE526: "dyn.n",
     0xE52B: "dyn.pp", 0xE52A: "dyn.ppp", 0xE52C: "dyn.mp", 0xE52D: "dyn.mf",

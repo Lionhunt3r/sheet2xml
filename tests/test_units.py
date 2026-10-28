@@ -90,3 +90,26 @@ def test_lyrics_syllables():
     xml = to_musicxml(Score(title="T", parts=[Part(name="Ch", measures=[m])]))
     assert '<lyric number="1"><syllabic>begin</syllabic><text>Lie</text></lyric>' in xml
     assert '<lyric number="2"><syllabic>end</syllabic><text>tes</text></lyric>' in xml
+
+
+def test_chord_symbols():
+    from sheet2xml.musicxml import harmony_xml
+
+    assert "<root-alter>-1</root-alter>" in harmony_xml("Bbmin7/Ab")
+    assert ">minor-seventh</kind>" in harmony_xml("Bbmin7/Ab")
+    assert "<bass-step>A</bass-step><bass-alter>-1</bass-alter>" in harmony_xml("Bbmin7/Ab")
+    assert "<root-step>B</root-step>" in harmony_xml("H7")
+    assert ">none</kind>" in harmony_xml("n.c.")
+    assert ">other</kind>" in harmony_xml("Cadd9")
+    assert harmony_xml("pizz") is None
+
+
+def test_rehearsal_letters():
+    from sheet2xml.model import Direction, Measure, Part
+    from sheet2xml.vector.assemble import _rehearsal_letters
+
+    part = Part(name="Ob", measures=[Measure(number=i) for i in range(1, 5)])
+    for m, letter in zip(part.measures, "ABC"):
+        m.directions.append(Direction(x=0, staff=1, kind="harmony", text=letter))
+    _rehearsal_letters(part)
+    assert all(d.kind == "rehearsal" for m in part.measures for d in m.directions)

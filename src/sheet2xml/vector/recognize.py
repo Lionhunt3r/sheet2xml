@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 
 from ..model import Clef, Direction, Event, Measure, Pitch
-from .extract import Curve, Glyph, PageContent, Polygon, Segment, Text
+from .extract import Glyph, PageContent, Polygon, Segment, Text
 from .layout import Staff, System
 
 # chord symbols (C, F#m7, Bbmaj7/D, Fmin, n.c.) and playing instructions are not lyrics
@@ -436,7 +436,7 @@ class SystemReader:
         sc.header_end = x_after
         self._lyrics(st, sc)
         # text directions last: upright text above a staff may be the lyrics of the staff above
-        for d in self._text_directions(st, [t for t in sc.texts if id(t) not in self.lyric_texts]):
+        for d in self._text_directions(st, [t for t in sc.texts if id(t) not in self.lyric_texts], sc.glyphs, bar_lines_x, sc.header_end):
             for m, (a, b) in zip(sc.measures, regions):
                 if a - 0.2 * sp <= d.x < b - 0.2 * sp or m is sc.measures[0] and d.x < a:
                     m.directions.append(d)
@@ -977,25 +977,58 @@ class SystemReader:
                 out.append(Direction(x=grp[0].x, staff=1, kind="dynamic", text=word, above=grp[0].y < st.top))
         return out
 
-    def _text_directions(self, st, texts) -> list[Direction]:
+    def _text_directions(self, st, texts, glyphs=(), bar_xs=(), header_end=0.0) -> list[Direction]:
         """Expression and tempo text: anything above the staff, italic text below it
-        (upright text below a staff is left to the lyrics)."""
+        (upright text below a staff is left to the lyrics). Chord symbols above the staff."""
         sp = st.space
         top_staff = min(self.system.staves + self.other_staves, key=lambda o: o.top)
-        out = []
+        accs = [g for g in glyphs if g.name in ("acc.flat", "acc.sharp") and g.y < st.top - 1.2 * sp]
+        out: list[Direction] = []
         for t in sorted(texts, key=lambda t: t.x0):
             word = t.text.strip()
-            if t.cx < st.x0 + sp or not any(ch.isalpha() for ch in word) or CHORD_NAME.match(word):
-                continue  # instrument names, numbers, chord symbols
+            if t.cx < st.x0 + sp or not any(ch.isalpha() for ch in word):
+                continue  # instrument names, numbers
             above = t.origin_y < st.top
+            if CHORD_NAME.match(word):
+                if not above or st.top - t.origin_y > 6 * sp:
+                    continue
+                bar = next((x for x in bar_xs if abs(t.cx - x) < 1.5 * sp), None)
+                if len(word) == 1 and (bar is not None or t.x0 < max(st.x0 + 2 * sp, (header_end or 0) + 0.5 * sp)):
+                    # a letter over a barline is a rehearsal mark, not a chord
+                    d = Direction(x=(bar if bar is not None else t.x0) + 0.1, staff=1, kind="rehearsal",
+                                  text=word, above=True)
+                    d._y, d._x1 = t.origin_y, t.x1  # type: ignore[attr-defined]
+                    out.append(d)
+                    continue
+                # flats and sharps in the music font right after a root or bass letter
+                acc_x1 = t.x1
+                width = max(1e-6, t.x1 - t.x0)
+                for g in sorted((g for g in accs if 0 <= g.x - t.x0 < width + 0.8 * sp
+                                 and abs(g.y - t.origin_y) < 1.2 * sp), key=lambda g: -g.x):
+                    idx = min(len(word), round((g.x - t.x0) / width * len(word)))
+                    letter = max((i for i, ch in enumerate(word[:idx]) if ch in "ABCDEFGH"), default=None)
+                    if letter is None or word[letter + 1:letter + 2] in ("#", "b", "♯", "♭"):
+                        continue
+                    word = word[:letter + 1] + ("b" if g.name == "acc.flat" else "#") + word[letter + 1:]
+                    acc_x1 = max(acc_x1, g.x1)
+                prev = out[-1] if out else None
+                if prev is not None and prev.kind == "harmony" and abs(prev._y - t.origin_y) < 0.5 * sp \
+                        and t.x0 - prev._x1 < 2.0 * sp and not word[:1].isupper():
+                    prev.text += word  # "F" + "min7/A" set as two pieces
+                    prev._x1 = acc_x1
+                    continue
+                d = Direction(x=t.x0, staff=1, kind="harmony", text=word, above=True)
+                d._y, d._x1 = t.origin_y, acc_x1  # type: ignore[attr-defined]
+                out.append(d)
+                continue
             if not above and not t.italic:
                 continue
             if above and st.top - t.origin_y > 6 * sp:
                 continue
             if above and st is top_staff and not t.bold and st.top - t.origin_y > 3 * sp:
                 continue  # page headers over the first staff of a page
-            if out and out[-1].above == above and abs(out[-1]._y - t.origin_y) < 0.5 * sp \
-                    and t.x0 - out[-1]._x1 < 1.5 * sp:
+            if out and out[-1].kind != "harmony" and out[-1].above == above \
+                    and abs(out[-1]._y - t.origin_y) < 0.5 * sp and t.x0 - out[-1]._x1 < 1.5 * sp:
                 out[-1].text += " " + word  # one phrase split into pieces
                 out[-1]._x1 = t.x1
                 continue

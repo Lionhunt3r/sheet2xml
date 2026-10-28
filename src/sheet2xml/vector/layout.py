@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .extract import Curve, Glyph, PageContent, Polygon, Segment
+from .extract import Glyph, PageContent, Polygon, Segment
 
 
 @dataclass

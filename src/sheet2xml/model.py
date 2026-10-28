@@ -53,7 +53,7 @@ class Clef:
 class Direction:
     x: float
     staff: int
-    kind: str  # "dynamic", "words", "tempo"
+    kind: str  # "dynamic", "words", "tempo", "harmony", "rehearsal"
     text: str
     above: bool = True
 

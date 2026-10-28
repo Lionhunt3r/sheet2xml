@@ -12,6 +12,9 @@ Als Eingabe gehen PDFs, Scans und Handyfotos.
 
 Ob ein PDF Notensatz-Daten enthält, erkennt das Programm selbst.
 
+Aus PDFs von Notenprogrammen werden außer den Noten auch Liedtexte (mehrere Strophen), Dynamik, Vortrags- und Tempoangaben,
+Akkordsymbole (als echte Akkorde, z.B. `Bbmin7/Ab`) und Studierbuchstaben übernommen.
+
 Takte, deren Rhythmus nicht aufgeht, werden markiert. Mit der Option **Mit Claude prüfen** schickt der Server diese Takte als Bildausschnitt
 zusammen mit der eigenen Lesung an Claude und übernimmt die Korrektur nur, wenn sie rhythmisch stimmt. Das gilt für PDFs aus
 Notenprogrammen ebenso wie für Scans und Fotos; dort lohnt es sich besonders, weil die Notenerkennung öfter Fähnchen,
