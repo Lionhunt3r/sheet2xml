@@ -740,9 +740,12 @@ class SystemReader:
         for left, right in zip(longs, longs[1:]):
             lx = left.stem.x0 if left.stem is not None else max(h.glyph.x1 for h in left.heads)
             rx = right.stem.x0 if right.stem is not None else right.x
+            ys = [h.glyph.y for h in left.heads + right.heads]
+            ys += [y for c in (left, right) if c.stem is not None for y in (c.stem.y0, c.stem.y1)]
+            ylo, yhi = min(ys) - 3 * sp, max(ys) + 3 * sp
             between = [bi for bi, b in enumerate(beams) if bi not in strokes
                        and lx - 0.5 * sp <= b.x0 and b.x1 <= rx + 0.5 * sp and b.x1 - b.x0 > 0.8 * sp
-                       and rx - lx < 8 * sp]
+                       and ylo <= b.y0 and b.y1 <= yhi and rx - lx < 8 * sp]
             if between and left.tremolo is None and right.tremolo is None:
                 left.tremolo = ("start", len(between))
                 right.tremolo = ("stop", len(between))
