@@ -232,25 +232,47 @@ def _voice_totals(m: Measure) -> set[Fraction]:
 
 
 def _accept_partial_measures(parts: list[Part]) -> None:
-    """A short first measure (pickup) and a short last measure are normal, not errors.
+    """Short measures that are normal notation, not reading errors: a pickup at the
+    start of the piece or of a movement, the short last measure, and a measure split
+    in two by a repeat or double barline. They count only if every part agrees."""
+    if not parts or not parts[0].measures:
+        return
+    n = min(len(p.measures) for p in parts)
 
-    They count only if every part agrees on the same shorter length."""
-    for idx in (0, -1):
-        lengths = set()
+    def short(i: int) -> Fraction | None:
+        length = None
         for p in parts:
-            if not p.measures:
-                return
-            m = p.measures[idx]
-            totals = _voice_totals(m)
-            if any(e.full_measure for e in m.events):
+            m = p.measures[i]
+            if any(e.full_measure for e in m.events) or not m.events:
                 continue
+            totals = _voice_totals(m)
             if len(totals) != 1:
-                return
-            lengths |= totals
-        if len(lengths) != 1 or not all(0 < t < (p.measures[idx].expected or 0) for p in parts for t in lengths):
+                return None
+            t = next(iter(totals))
+            if not 0 < t < (m.expected or 0) or (length is not None and t != length):
+                return None
+            length = t
+        return length
+
+    lengths = [short(i) for i in range(n)]
+    ok = set()
+    for i, length in enumerate(lengths):
+        if length is None:
             continue
-        for p in parts:
-            p.measures[idx].warnings = [w for w in p.measures[idx].warnings if not w.startswith("voice")]
+        expected = parts[0].measures[i].expected
+        bar = parts[0].measures[i].barline
+        prev_bar = parts[0].measures[i - 1].barline if i else "final"
+        if i == n - 1 or bar in ("final", "repeat-end") or prev_bar in ("final", "repeat-end"):
+            ok.add(i)
+        elif i + 1 < n and lengths[i + 1] is not None and length + lengths[i + 1] == expected:
+            ok |= {i, i + 1}
+            for p in parts:
+                p.measures[i + 1].implicit = i > 0
+    for p in parts:
+        for i in ok:
+            m = p.measures[i]
+            m.partial = True
+            m.warnings = [w for w in m.warnings if not w.startswith("voice")]
 
 
 def _map_groups(parts: list[Part], groups, labels, first: bool) -> list[int | None]:
@@ -418,6 +440,7 @@ def _merge_staff(dst: Measure, src: Measure, staff: int) -> None:
         dst.key = src.key
         dst.expected = src.expected
         dst.barline = src.barline
+        dst.repeat_start = src.repeat_start
         dst.rest_measures = src.rest_measures
         for attr in ("_time", "_time_symbol", "_key"):
             if hasattr(src, attr):
@@ -439,6 +462,8 @@ def _expand(part: Part, m: Measure, count: int) -> None:
             mm.clefs = m.clefs
             mm.time, mm.key, mm.time_symbol = m.time, m.key, m.time_symbol
             mm.directions = m.directions
+        if k == 0:
+            mm.repeat_start = m.repeat_start
         if k == count - 1:
             mm.barline = m.barline
         for s in range(1, part.staves + 1):

@@ -67,9 +67,12 @@ class Measure:
     clefs: dict[int, Clef] = field(default_factory=dict)  # staff -> clef at measure start
     clef_changes: list[tuple[float, int, Clef]] = field(default_factory=list)  # (x, staff, clef)
     directions: list[Direction] = field(default_factory=list)
-    barline: str | None = None  # "final", "double", "repeat-end", "repeat-start"
+    barline: str | None = None  # right barline: "final", "double", "repeat-end"
+    repeat_start: bool = False  # left barline opens a repeat
     expected: Fraction | None = None  # length implied by the time signature
     rest_measures: int = 1  # >1 for a multi-measure rest placeholder
+    partial: bool = False  # deliberately short: pickup, end of movement, split at a repeat
+    implicit: bool = False  # second half of a split measure: does not count in numbering
     warnings: list[str] = field(default_factory=list)
 
 

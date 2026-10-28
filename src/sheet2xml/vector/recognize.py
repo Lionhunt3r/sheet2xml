@@ -270,10 +270,14 @@ class SystemReader:
         x_after = (header_clef.x1 if header_clef else st.x0) + 0.2 * sp
         accs = [g for g in glyphs if g.name.startswith("acc.")]
         heads = [g for g in glyphs if g.name.startswith("head.")]
-        key_accs, x_after = self._key_signature(accs, heads, x_after, first_content_x, sp)
+        # key signatures stay within the staff (at most a space above or below it)
+        key_cands = [a for a in accs if st.top - 1.2 * sp <= a.y <= st.bottom + 1.2 * sp]
+        key_accs, x_after = self._key_signature(key_cands, heads, x_after, first_content_x, sp)
         used_ids: set[int] = {id(g) for g in key_accs}
         if key_accs:
             sc.key = _fifths(key_accs)
+        elif header_clef is not None:
+            sc.key = 0  # a system that opens without a key signature is in C major / A minor
         time_digits = [
             g for g in glyphs
             if g.name.startswith("time.") and st.top - 0.6 * sp <= g.y <= st.bottom + 0.6 * sp
@@ -329,7 +333,7 @@ class SystemReader:
         key_changes = []
         for bx in bxs:
             ka, _ = self._key_signature(
-                [a for a in accs if id(a) not in used_ids], heads, bx + 0.2 * sp, st.x1, sp, max_start=2.5 * sp
+                [a for a in key_cands if id(a) not in used_ids], heads, bx + 0.2 * sp, st.x1, sp, max_start=2.5 * sp
             )
             if ka:
                 key_changes.append((bx, _fifths(ka)))
@@ -340,9 +344,13 @@ class SystemReader:
         self._accidentals(st, [a for a in accs if id(a) not in used_ids], chords)
 
         directions = self._directions(st, glyphs, sc.texts)
+        repeat_end, repeat_start = self._repeats(st, glyphs, barlines)
 
         for mi, (a, b) in enumerate(regions):
             m = Measure(number=0)
+            m.repeat_start = any(abs(x - a) < 0.5 * sp for x in repeat_start)
+            if mi == 0 and carry.pop("repeat_start", False):
+                m.repeat_start = True  # the previous system ended with a start-repeat barline
             in_region = lambda x: a - 0.2 * sp <= x < b - 0.2 * sp  # noqa: E731
             for x, k in key_changes:
                 if abs(x - a) < 0.5 * sp:
@@ -376,6 +384,8 @@ class SystemReader:
             kind = bkinds.get(round(b, 1)) if b in bxs else None
             if kind in ("final", "double", "heavy"):
                 m.barline = "final" if kind in ("final", "heavy") else "double"
+            if any(abs(x - b) < 0.5 * sp for x in repeat_end):
+                m.barline = "repeat-end"
             m._geom = (self.pc.number, a, b, st.top, st.bottom, st.space, clef)  # type: ignore[attr-defined]
             m._time = time  # type: ignore[attr-defined]
             m._time_symbol = time_symbol  # type: ignore[attr-defined]
@@ -383,6 +393,8 @@ class SystemReader:
             if m.clef_changes:
                 clef = m.clef_changes[-1][2]
             sc.measures.append(m)
+        if any(x > st.x1 - 0.5 * sp for x in repeat_start):
+            carry["repeat_start"] = True
         carry["clef"] = clef
         carry["key"] = key
         carry["time"] = time
@@ -593,6 +605,32 @@ class SystemReader:
             elif right and cv.x0 < st.x0 + 8 * sp and not left:
                 h = min(right, key=lambda p: abs(p[0].glyph.y - ymid))[0]
                 h.tie_stop = True
+
+    @staticmethod
+    def _repeats(st: Staff, glyphs, barlines) -> tuple[list[float], list[float]]:
+        """Barlines with repeat dots: (x of barlines ending a repeat, x of barlines starting one).
+
+        Both are given as the right edge of the barline, like the measure regions."""
+        sp = st.space
+        dots = [
+            g for g in glyphs
+            if g.name in ("repeat.dot", "repeat.dots", "dot") and st.top + 1.2 * sp < g.y < st.top + 2.8 * sp
+        ]
+
+        def has_dots(lo: float, hi: float) -> bool:
+            here = [g for g in dots if lo < g.x < hi]
+            if any(g.name == "repeat.dots" for g in here):
+                return True
+            ys = {round((g.y - st.top) / sp * 2) for g in here}  # half spaces: 3 and 5
+            return {3, 5} <= ys
+
+        end, start = [], []
+        for x0, x1, _kind in barlines:
+            if has_dots(x0 - 1.6 * sp, x0 - 0.05 * sp):
+                end.append(x1)
+            if has_dots(x1 + 0.05 * sp, x1 + 1.6 * sp):
+                start.append(x1)
+        return end, start
 
     def _rehearsal_mark(self, t, sp: float) -> bool:
         cx, cy = t.cx, (t.y0 + t.y1) / 2

@@ -103,14 +103,16 @@ class _Writer:
     # ------------------------------------------------------------------ parts
     def part(self, idx: int, p: Part) -> None:
         self.w(f'  <part id="P{idx}">')
+        self.clef_now: dict[int, object] = {}
         pickup = False
         if p.measures:
             m0 = p.measures[0]
             total = _voice_len(m0)
             pickup = bool(m0.expected and 0 < total < m0.expected and not any(e.full_measure for e in m0.events))
         for mi, m in enumerate(p.measures):
+            # implicit: the second half of a split measure is not counted by the notation program
             number = mi if pickup else mi + 1
-            self.measure(p, m, mi, number, implicit=pickup and mi == 0)
+            self.measure(p, m, mi, number, implicit=(pickup and mi == 0) or m.implicit)
         self.w("  </part>")
 
     def measure(self, p: Part, m: Measure, mi: int, number: int, implicit: bool) -> None:
@@ -130,6 +132,9 @@ class _Writer:
             att.append(f"<staves>{p.staves}</staves>")
         for s in sorted(m.clefs):
             c = m.clefs[s]
+            if mi > 0 and self.clef_now.get(s) == c:
+                continue  # the clef printed at every system start is not a change
+            self.clef_now[s] = c
             num = f' number="{s}"' if p.staves > 1 else ""
             oc = f"<clef-octave-change>{c.octave_change}</clef-octave-change>" if c.octave_change else ""
             line = "" if c.sign == "percussion" else f"<line>{c.line}</line>"
@@ -140,10 +145,13 @@ class _Writer:
         if att:
             self.w("      <attributes>" + "".join(att) + "</attributes>")
 
+        if m.repeat_start:
+            self.w('      <barline location="left"><bar-style>heavy-light</bar-style>'
+                   '<repeat direction="forward"/></barline>')
         voices = sorted({e.voice for e in m.events}) or [1]
         expected = m.expected or Fraction(4)
         full = max([_voice_len(m, v) for v in voices] + [Fraction(0)])
-        measure_len = max(expected, full) if not implicit else full
+        measure_len = full if (implicit or m.partial) and full else max(expected, full)
         pending_dirs = sorted(m.directions, key=lambda d: d.x)
         pending_clefs = sorted(m.clef_changes, key=lambda c: c[0])
         first_voice_of_staff: dict[int, int] = {}
@@ -161,6 +169,9 @@ class _Writer:
                 if first_voice_of_staff.get(e.staff) == v:
                     while pending_clefs and pending_clefs[0][1] == e.staff and pending_clefs[0][0] <= e.x + 0.5:
                         _, s, c = pending_clefs.pop(0)
+                        if self.clef_now.get(s) == c:
+                            continue
+                        self.clef_now[s] = c
                         num = f' number="{s}"' if p.staves > 1 else ""
                         line = "" if c.sign == "percussion" else f"<line>{c.line}</line>"
                         self.w(f"      <attributes><clef{num}><sign>{c.sign}</sign>{line}</clef></attributes>")
@@ -187,7 +198,10 @@ class _Writer:
                 self.w(f"      <forward><duration>{self.dur(measure_len - pos)}</duration></forward>")
         for d in pending_dirs:
             self.direction(d, p.staves)
-        if m.barline:
+        if m.barline == "repeat-end":
+            self.w('      <barline location="right"><bar-style>light-heavy</bar-style>'
+                   '<repeat direction="backward"/></barline>')
+        elif m.barline:
             style = {"final": "light-heavy", "double": "light-light"}.get(m.barline, "regular")
             self.w(f'      <barline location="right"><bar-style>{style}</bar-style></barline>')
         self.w("    </measure>")

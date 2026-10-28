@@ -86,7 +86,7 @@ SMUFL: dict[int, str] = {
     0xE4EE: "rest.hbar",
     0xE240: "flag.up.1", 0xE241: "flag.down.1", 0xE242: "flag.up.2", 0xE243: "flag.down.2",
     0xE244: "flag.up.3", 0xE245: "flag.down.3", 0xE246: "flag.up.4", 0xE247: "flag.down.4",
-    0xE1E7: "dot",
+    0xE1E7: "dot", 0xE043: "repeat.dots", 0xE044: "repeat.dot",
     0xE08A: "time.common", 0xE08B: "time.cut",
     0xE4A0: "art.accent", 0xE4A1: "art.accent", 0xE4A2: "art.staccato", 0xE4A3: "art.staccato",
     0xE4A4: "art.tenuto", 0xE4A5: "art.tenuto", 0xE4C0: "art.fermata", 0xE4C1: "art.fermata",
