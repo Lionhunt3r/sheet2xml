@@ -736,6 +736,16 @@ class SystemReader:
                     c.tremolo = ("single", c.tremolo[1] + 1 if c.tremolo else 1)
                 else:
                     c.tremolo = ("single", int(g.name.split(".")[1]))
+        # arpeggio: a wavy line just left of the chord, along its notes
+        for g in glyphs:
+            if g.name != "arpeggio":
+                continue
+            near = [c for c in chords if -0.5 * sp < c.x - g.x < 2.5 * sp
+                    and c.top - 1.5 * sp <= g.y <= c.bottom + 1.5 * sp]
+            if near:
+                c = min(near, key=lambda c: c.x - g.x)
+                if "arpeggiate" not in c.articulations:
+                    c.articulations.append("arpeggiate")
         longs = sorted((c for c in chords if c.value >= 2 and not c.grace), key=lambda c: c.x)
         for left, right in zip(longs, longs[1:]):
             lx = left.stem.x0 if left.stem is not None else max(h.glyph.x1 for h in left.heads)

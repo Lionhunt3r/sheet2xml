@@ -85,6 +85,7 @@ SONATA_DYN: dict[str, str] = {
 
 # --- SMuFL mapping (code point -> name) ---
 SMUFL: dict[int, str] = {
+    0xEAA9: "arpeggio", 0xEAAA: "arpeggio", 0xE63C: "arpeggio",
     0xE220: "trem.1", 0xE221: "trem.2", 0xE222: "trem.3", 0xE223: "trem.4", 0xE224: "trem.5",
     0xE510: "ottava.8", 0xE511: "ottava.8", 0xE512: "ottava.8vb", 0xE51C: "ottava.8vb",
     0xE514: "ottava.15", 0xE515: "ottava.15", 0xE516: "ottava.15mb", 0xE51D: "ottava.15mb",
@@ -172,6 +173,7 @@ SONATA_SPECIAL: dict[str, str] = {
     "{": "brace",
     "æ": "trem.stroke",  # one tremolo stroke; a note gets as many as are stacked on its stem
     "~": "head.diamond.whole",
+    "∏": "arpeggio",  # one turn of the wavy line, set rotated
 }
 
 

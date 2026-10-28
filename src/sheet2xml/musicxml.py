@@ -363,6 +363,8 @@ class _Writer:
                 nota += '<tied type="stop"/>'
             if pt.tie_start:
                 nota += '<tied type="start"/>'
+            if "arpeggiate" in e.articulations:
+                nota += "<arpeggiate/>"  # on every note of the chord
             if i == 0:
                 nota += self._slur_notation(e)
                 nota += self._tuplet_notation(e, tstart, tstop)
@@ -373,7 +375,8 @@ class _Writer:
                         marks += f'<tremolo type="{e.tremolo[0]}">{min(e.tremolo[1], 4)}</tremolo>'
                     if marks:
                         nota += f"<{tag}>{marks}</{tag}>"
-                arts = [a for a in e.articulations if a != "fermata" and a not in ORNAMENTS | TECHNICAL]
+                arts = [a for a in e.articulations
+                        if a not in ("fermata", "arpeggiate") and a not in ORNAMENTS | TECHNICAL]
                 if arts:
                     nota += "<articulations>" + "".join(f"<{a}/>" for a in arts) + "</articulations>"
                 if "fermata" in e.articulations:

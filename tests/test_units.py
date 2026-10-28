@@ -134,3 +134,18 @@ def test_slurs_endings_and_hairpins():
     assert '<ending number="1" type="stop"/>' in xml
     # the hairpin opens at the first note and closes before the second
     assert xml.index('<wedge type="crescendo"/>') < xml.index("<duration>") < xml.index('<wedge type="stop"/>')
+
+
+def test_printed_accidentals_and_arpeggio():
+    m = Measure(number=1, time=(4, 4), key=-1, expected=Fraction(4))
+    m.events = [
+        Event(x=0, duration=Fraction(1), pitches=[Pitch("B", 4, -1)], base=Fraction(1)),  # in the key
+        Event(x=1, duration=Fraction(1), pitches=[Pitch("E", 5, -1)], base=Fraction(1)),  # flat
+        Event(x=2, duration=Fraction(1), pitches=[Pitch("E", 5, -1)], base=Fraction(1)),  # still flat
+        Event(x=3, duration=Fraction(1), pitches=[Pitch("B", 4, 0), Pitch("D", 5)], base=Fraction(1),
+              articulations=["arpeggiate"]),  # natural
+    ]
+    xml = to_musicxml(Score(title="T", parts=[Part(name="Klavier", measures=[m])]))
+    assert xml.count("<accidental>") == 2
+    assert "<accidental>flat</accidental>" in xml and "<accidental>natural</accidental>" in xml
+    assert xml.count("<arpeggiate/>") == 2
