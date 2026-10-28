@@ -17,13 +17,16 @@ from .layout import Staff, System
 
 # chord symbols (C, F#m7, Bbmaj7/D, Fmin, n.c.) and playing instructions are not lyrics
 CHORD_NAME = re.compile(r"^([A-H][#b♯♭]?(m|min|maj|dim|aug|sus|add|M|°|ø|\+|-)?[0-9]*(\([^)]*\))?"
-                        r"(/[A-H][#b♯♭]?)?|n\.?c\.?|N\.?C\.?)$")
+                        r"(/[A-H][#b♯♭]?)?|n\.?c\.?|N\.?C\.?"
+                        r"|/[A-H][#b♯♭]?|(m|min|maj|dim|aug|sus|add)[0-9]*(/[A-H][#b♯♭]?)?)$")
 NOT_LYRICS = {
     "pizz", "arco", "div", "unis", "tutti", "solo", "soli", "trem", "col legno", "sul", "con sord", "senza sord",
     "rit", "ritard", "rall", "accel", "a tempo", "cresc", "decresc", "dim", "simile", "legato", "stacc", "ten",
     "espr", "dolce", "marc", "sempre", "poco", "molto", "subito", "sub", "fine", "coda", "segno", "tacet",
     "1st only", "2nd only", "only", "1x", "2x", "opt", "ad lib", "gliss", "harm", "mute", "open", "loco",
 }
+
+DYNAMIC_WORDS = {"p", "pp", "ppp", "mp", "mf", "f", "ff", "fff", "sf", "sfz", "fp", "sfp", "rf", "rfz", "fz"}
 
 HEAD_VALUE = {
     "head.breve": Fraction(8),
@@ -175,6 +178,7 @@ class SystemReader:
         self.other_staves = [s for s in (page_staves or []) if id(s) not in own]
         self.carry = carry  # per staff position in system order: last clef/key/time
         self.sp = sum(s.space for s in system.staves) / len(system.staves)
+        self.lyric_texts: set[int] = set()  # texts read as lyrics
         self.warnings: list[str] = []
 
     # ------------------------------------------------------------------ setup
@@ -431,71 +435,103 @@ class SystemReader:
             sc.measures.pop()
         sc.header_end = x_after
         self._lyrics(st, sc)
+        # text directions last: upright text above a staff may be the lyrics of the staff above
+        for d in self._text_directions(st, [t for t in sc.texts if id(t) not in self.lyric_texts]):
+            for m, (a, b) in zip(sc.measures, regions):
+                if a - 0.2 * sp <= d.x < b - 0.2 * sp or m is sc.measures[0] and d.x < a:
+                    m.directions.append(d)
+                    break
 
     def _lyrics(self, st: Staff, sc: StaffContent) -> None:
-        """Lyrics: lines of upright text below the staff whose syllables sit under its notes."""
+        """Lyrics: lines of upright text under the staff whose syllables sit under its notes
+        (or, for a lower choir staff, between the staves above it)."""
         sp = st.space
         notes = [e for m in sc.measures for e in m.events if not e.is_rest and not e.grace]
         if not notes:
             return
+        heads = [g.y for g in sc.glyphs if g.name.startswith("head.")]
+        low = max([st.bottom] + heads)
+        high = min([st.top] + heads)
         below = [o.top for o in self.system.staves + self.other_staves if o.top > st.bottom + sp]
         limit = min(below + [st.bottom + 14 * sp])
+        accepted: list[list[tuple]] = []
+        # above the staff: only text no other staff has taken as its lyrics, close to the notes
+        for line in self._text_lines(st, lambda y: st.top - 6 * sp < y < st.top - 0.8 * sp):
+            if high - line[0][0] > 6.5 * sp:
+                continue
+            matched, n = self._match_syllables(line, notes, sp)
+            if len(matched) >= 2 and len(matched) >= 0.7 * n:
+                accepted.append(matched)
+                self.lyric_texts.update(tok[4] for tok in line)
+        # below the staff: the first verse close under the staff (or its lowest notes),
+        # the next ones right under the previous verse
+        last_y = None
+        for line in self._text_lines(st, lambda y: st.bottom + 0.8 * sp < y < limit):
+            y = line[0][0]
+            if y - (low if last_y is None else last_y) > (6.5 if last_y is None else 3.5) * sp:
+                continue
+            matched, n = self._match_syllables(line, notes, sp)
+            # a single syllable counts only right under an accepted verse (end of a second verse)
+            alone = len(matched) == n == 1 and last_y is not None
+            if (len(matched) < 2 and not alone) or len(matched) < 0.6 * n:
+                continue
+            last_y = y
+            accepted.append(matched)
+            self.lyric_texts.update(tok[4] for tok in line)
+        for verse, matched in enumerate(accepted, start=1):
+            for e, text in matched:
+                while len(e.lyrics) < verse:
+                    e.lyrics.append("")
+                e.lyrics[verse - 1] = text
+
+    def _text_lines(self, st: Staff, band) -> list[list[tuple]]:
+        """Upright words in a horizontal band, grouped into lines: (y, x0, x1, word, text id)."""
+        sp = st.space
         tokens = []
         for t in self.pc.texts:
-            if not (st.bottom + 0.8 * sp < t.origin_y < limit) or t.italic or t.bold:
+            if not band(t.origin_y) or t.italic or t.bold or id(t) in self.lyric_texts:
                 continue
             if not (st.x0 - sp < t.cx < st.x1 + sp):
                 continue
             for w, x0, x1 in t.words or [(t.text, t.x0, t.x1)]:
-                tokens.append((t.origin_y, x0, x1, w))
-        tokens.sort()
+                tokens.append((t.origin_y, x0, x1, w, id(t)))
+        tokens.sort(key=lambda t: t[:3])
         lines: list[list[tuple]] = []
         for tok in tokens:
             if lines and abs(tok[0] - lines[-1][0][0]) < 0.4 * sp:
                 lines[-1].append(tok)
             else:
                 lines.append([tok])
-        verse = 0
-        last_y = 0.0
-        low = max([st.bottom] + [g.y for g in sc.glyphs if g.name.startswith("head.")])
         for line in lines:
             line.sort(key=lambda t: t[1])
-            words = [w for *_, w in line if w.strip("-–_")]
-            if not words or sum(1 for w in words if CHORD_NAME.match(w) or w.lower().strip(".") in NOT_LYRICS) * 2 >= len(words):
-                continue  # chord symbols over the next staff, playing instructions
-            sylls: list[list] = []  # [text, x0, x1, continues]
-            for _, x0, x1, w in line:
-                if w.strip("-–_") == "":
-                    if "-" in w or "–" in w:
-                        if sylls:
-                            sylls[-1][3] = True
-                    continue
-                cont = w.endswith(("-", "–"))
-                sylls.append([w.strip("-–"), x0, x1, cont])
-            matched = []
-            used: set[int] = set()
-            for text, x0, x1, cont in sylls:
-                c = (x0 + x1) / 2
-                cands = [e for e in notes if id(e) not in used and abs(e.x + 0.55 * sp - c) < 2.5 * sp]
-                if not cands:
-                    continue
-                e = min(cands, key=lambda e: (round(abs(e.x + 0.55 * sp - c) / (0.4 * sp)), e.voice))
-                used.add(id(e))
-                matched.append((e, text + ("-" if cont else "")))
-            # the first verse sits close under the staff (or its lowest notes), the next ones
-            # right under the previous verse
-            if line[0][0] - (last_y if verse else low) > (3.5 if verse else 6.5) * sp:
+        return lines
+
+    @staticmethod
+    def _match_syllables(line, notes, sp) -> tuple[list[tuple], int]:
+        """Pair each syllable with the note it sits under: ([(event, syllable)], syllables)."""
+        words = [tok[3] for tok in line if tok[3].strip("-–_") and not re.fullmatch(r"\d+\.?\)?", tok[3])]
+        if not words or sum(1 for w in words if CHORD_NAME.match(w) or w.lower().strip(".") in NOT_LYRICS) * 2 >= len(words):
+            return [], 0  # chord symbols over the next staff, playing instructions
+        sylls: list[list] = []  # [text, x0, x1, continues]
+        for _, x0, x1, w, _ in line:
+            if w.strip("-–_") == "":
+                if ("-" in w or "–" in w) and sylls:
+                    sylls[-1][3] = True
                 continue
-            # a single syllable counts only right under an accepted verse (end of a second verse)
-            alone = len(matched) == len(sylls) == 1 and verse
-            if (len(matched) < 2 and not alone) or len(matched) < 0.6 * len(sylls):
+            if re.fullmatch(r"\d+\.?\)?", w):
+                continue  # verse numbers, volta numbers
+            sylls.append([w.strip("-–"), x0, x1, w.endswith(("-", "–"))])
+        matched = []
+        used: set[int] = set()
+        for text, x0, x1, cont in sylls:
+            c = (x0 + x1) / 2
+            cands = [e for e in notes if id(e) not in used and abs(e.x + 0.55 * sp - c) < 2.5 * sp]
+            if not cands:
                 continue
-            verse += 1
-            last_y = line[0][0]
-            for e, text in matched:
-                while len(e.lyrics) < verse:
-                    e.lyrics.append("")
-                e.lyrics[verse - 1] = text
+            e = min(cands, key=lambda e: (round(abs(e.x + 0.55 * sp - c) / (0.4 * sp)), e.voice))
+            used.add(id(e))
+            matched.append((e, text + ("-" if cont else "")))
+        return matched, len(sylls)
 
     # ------------------------------------------------------------------ pieces
     def _key_signature(self, accs, heads, x_start, limit, sp, max_start=4.0 * 4):
@@ -939,6 +975,34 @@ class SystemReader:
             word = "".join(g.name[4:] for g in grp)
             if word in ("p", "pp", "ppp", "mp", "mf", "f", "ff", "fff", "sf", "sfz", "fp", "sfp", "sfpp", "rf", "rfz", "fz"):
                 out.append(Direction(x=grp[0].x, staff=1, kind="dynamic", text=word, above=grp[0].y < st.top))
+        return out
+
+    def _text_directions(self, st, texts) -> list[Direction]:
+        """Expression and tempo text: anything above the staff, italic text below it
+        (upright text below a staff is left to the lyrics)."""
+        sp = st.space
+        top_staff = min(self.system.staves + self.other_staves, key=lambda o: o.top)
+        out = []
+        for t in sorted(texts, key=lambda t: t.x0):
+            word = t.text.strip()
+            if t.cx < st.x0 + sp or not any(ch.isalpha() for ch in word) or CHORD_NAME.match(word):
+                continue  # instrument names, numbers, chord symbols
+            above = t.origin_y < st.top
+            if not above and not t.italic:
+                continue
+            if above and st.top - t.origin_y > 6 * sp:
+                continue
+            if above and st is top_staff and not t.bold and st.top - t.origin_y > 3 * sp:
+                continue  # page headers over the first staff of a page
+            if out and out[-1].above == above and abs(out[-1]._y - t.origin_y) < 0.5 * sp \
+                    and t.x0 - out[-1]._x1 < 1.5 * sp:
+                out[-1].text += " " + word  # one phrase split into pieces
+                out[-1]._x1 = t.x1
+                continue
+            kind = "dynamic" if word in DYNAMIC_WORDS else ("tempo" if t.bold and above else "words")
+            d = Direction(x=t.x0, staff=1, kind=kind, text=word, above=above)
+            d._y, d._x1 = t.origin_y, t.x1  # type: ignore[attr-defined]
+            out.append(d)
         return out
 
     # ------------------------------------------------------------------ events

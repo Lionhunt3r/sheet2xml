@@ -216,6 +216,8 @@ class _Writer:
         place = "above" if d.above else "below"
         if d.kind == "dynamic" and d.text in DYNAMICS:
             body = f"<dynamics><{d.text}/></dynamics>"
+        elif d.kind == "tempo":
+            body = f'<words font-weight="bold">{escape(d.text)}</words>'
         else:
             body = f"<words>{escape(d.text)}</words>"
         staff = f"<staff>{d.staff}</staff>" if staves > 1 else ""
