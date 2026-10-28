@@ -217,8 +217,11 @@ class SystemReader:
                 if min(s.x0, s.x1) - 0.3 * st.space <= cx <= max(s.x0, s.x1) + 0.3 * st.space
                 and lo <= s.y0 <= hi
             ]
-            # the ledger lines must reach the note; lines far from it belong to other notes
-            n = len(ys) if any(abs(y - g.y) < 1.1 * st.space for y in ys) else 0
+            # the ledger lines must lead from the staff to the note; lines far from
+            # either end belong to other notes
+            edge = st.bottom if side == "above" else st.top
+            reach = any(abs(y - g.y) < 1.1 * st.space for y in ys) and any(abs(y - edge) < 1.3 * st.space for y in ys)
+            n = len(ys) if reach else 0
             if n > best_n or (n == best_n and n and best is not None and st.distance(g.y) < best.staff.distance(g.y)):
                 best, best_n = c, n
         return best
@@ -459,7 +462,7 @@ class SystemReader:
         for h in heads:
             g = h.glyph
             hw = (g.x1 - g.x0) if g.x1 - g.x0 < 2.2 * sp else 1.2 * sp
-            best, bestd = None, None
+            cands = []
             for s in stems:
                 sx = s.x0
                 y0, y1 = min(s.y0, s.y1), max(s.y0, s.y1)
@@ -467,9 +470,20 @@ class SystemReader:
                     continue
                 if not (y0 - 0.6 * sp <= g.y <= y1 + 0.6 * sp):
                     continue
-                d = min(abs(sx - g.x), abs(sx - (g.x + hw)))
-                if bestd is None or d < bestd:
-                    best, bestd = s, d
+                cands.append((min(abs(sx - g.x), abs(sx - (g.x + hw))), s))
+            cands.sort(key=lambda t: t[0])
+            best = cands[0][1] if cands else None
+            if len(cands) > 1:
+                # a unison of two voices is drawn as two identical heads, one per stem
+                twin = any(o.pos == h.pos and abs(o.glyph.x - g.x) < 0.3 * sp
+                           for o in by_stem.get(id(best), []))
+                other = cands[1][1]
+
+                def goes_up(s) -> bool:
+                    return (min(s.y0, s.y1) + max(s.y0, s.y1)) / 2 < g.y
+
+                if twin and goes_up(other) != goes_up(best):
+                    best = other
             if best is not None and g.name not in ("head.whole", "head.breve", "head.slash.whole"):
                 h.stem = best
                 by_stem.setdefault(id(best), []).append(h)
@@ -570,12 +584,19 @@ class SystemReader:
                 else:
                     if t.glyph.x1 - 0.3 * sp <= d.x and abs(t.glyph.y - d.y) < 2.5 * sp:
                         owner = t
-            if owner is not None:
-                key = "_dotx"
-                xs = getattr(owner, key, [])
+            if owner is None:
+                continue
+            owners = [owner]
+            if isinstance(owner, Chord):
+                # a head shared by two voices carries one dot for both
+                pos = {h.pos for h in owner.heads}
+                owners += [c for c in chords if c is not owner and abs(c.x - owner.x) < 0.3 * sp
+                           and pos & {h.pos for h in c.heads} and c.value == owner.value]
+            for o in owners:
+                xs = getattr(o, "_dotx", [])
                 if all(abs(d.x - x) > 0.5 * sp for x in xs):
                     xs.append(d.x)
-                setattr(owner, key, xs)
+                o._dotx = xs  # type: ignore[attr-defined]
         for t in [c for c in chords] + rests:
             t.dots = len(getattr(t, "_dotx", []))
         return chords, rests
