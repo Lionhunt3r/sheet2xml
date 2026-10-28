@@ -288,8 +288,19 @@ class _Writer:
                     nota += '<fermata type="upright"/>'
             if nota:
                 xml.append(f"<notations>{nota}</notations>")
+            if i == 0 and e.lyric:
+                xml.append(self._lyric(e.lyric))
             xml.append("</note>")
             self.w("".join(xml))
+
+    def _lyric(self, text: str) -> str:
+        """A syllable; a trailing '-' means the word goes on with the next note."""
+        cont = text.endswith("-")
+        word = getattr(self, "in_word", False)
+        syllabic = ("middle" if cont else "end") if word else ("begin" if cont else "single")
+        self.in_word = cont
+        return (f'<lyric number="1"><syllabic>{syllabic}</syllabic>'
+                f"<text>{escape(text.rstrip('-').strip())}</text></lyric>")
 
     @staticmethod
     def _tuplet_notation(e: Event, tstart: bool, tstop: bool) -> str:

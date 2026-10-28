@@ -67,8 +67,10 @@ def read_mxl(path: str) -> str:
         return z.read(root).decode("utf-8")
 
 
-def run_audiveris(inputs: list[str], timeout: int = 900) -> list[str]:
-    """Run Audiveris on images/PDFs; returns MusicXML strings (one per exported file)."""
+def run_audiveris(inputs: list[str], timeout: int = 900, keep_dir: str | None = None) -> list[str]:
+    """Run Audiveris on images/PDFs; returns MusicXML strings (one per exported file).
+
+    keep_dir: copy Audiveris' project files (.omr, with the geometry of what it read) there."""
     binary = audiveris_binary()
     if not binary:
         raise OMRError("Audiveris ist nicht installiert (AUDIVERIS_BIN setzen)")
@@ -82,18 +84,10 @@ def run_audiveris(inputs: list[str], timeout: int = 900) -> list[str]:
         env["JAVA_TOOL_OPTIONS"] += " -Djava.awt.headless=true"
         if "TESSDATA_PREFIX" not in env and (tessdata := _tessdata()):
             env["TESSDATA_PREFIX"] = tessdata
-        # lyrics and chord symbols are read with Tesseract (German + English)
-        cmd = [binary, "-batch", "-export", "-output", out_dir,
-               "-constant", "org.audiveris.omr.text.Language.defaultSpecification=deu+eng", "--", *inputs]
-        env = dict(os.environ)
-        env.setdefault("JAVA_TOOL_OPTIONS", "")
-        env["JAVA_TOOL_OPTIONS"] += " -Djava.awt.headless=true"
-        if "TESSDATA_PREFIX" not in env:
-            found = sorted(glob.glob("/usr/share/tesseract-ocr/*/tessdata")) + ["/opt/tessdata"] * os.path.isdir("/opt/tessdata") + sorted(
-                glob.glob("/opt/homebrew/share/tessdata")) + sorted(glob.glob("/usr/local/share/tessdata"))
-            if found:
-                env["TESSDATA_PREFIX"] = found[-1]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+        if keep_dir:
+            for f in glob.glob(os.path.join(out_dir, "**", "*.omr"), recursive=True):
+                shutil.copy(f, keep_dir)
         files = sorted(glob.glob(os.path.join(out_dir, "**", "*.mxl"), recursive=True))
         files += sorted(glob.glob(os.path.join(out_dir, "**", "*.xml"), recursive=True))
         if not files:

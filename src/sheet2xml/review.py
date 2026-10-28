@@ -46,6 +46,7 @@ class NoteOut(BaseModel):
     voice: Literal[1, 2] = Field(description="1 = upper/stems up voice or the only voice, 2 = lower voice")
     staff: int = Field(ge=1, le=4, description="staff number from the top inside the instrument")
     whole_measure_rest: bool = Field(description="true if this rest fills the whole measure")
+    lyric: str = Field(default="", description="the lyric syllable printed under this note, if any")
 
 
 class MeasureFix(BaseModel):
@@ -113,8 +114,8 @@ def _parse_pitch(s: str) -> Pitch | None:
     return Pitch(step=step, octave=octave, alter=alter)
 
 
-def _apply(m: Measure, fix: MeasureFix, staves: int) -> bool:
-    expected = m.expected or Fraction(4)
+def events_from_fix(fix: MeasureFix, expected: Fraction, staves: int) -> list[Event] | None:
+    """Claude's transcription as events, or None unless every voice fills the measure."""
     events: list[Event] = []
     x = 0.0
     for n in fix.notes:
@@ -133,16 +134,24 @@ def _apply(m: Measure, fix: MeasureFix, staves: int) -> bool:
             d = expected
         pitches = [] if n.rest else [p for p in (_parse_pitch(s) for s in n.pitches) if p]
         if not n.rest and not pitches:
-            return False
+            return None
         events.append(Event(x=x, duration=d, pitches=pitches, voice=voice, staff=staff, base=base, dots=n.dots,
-                            tuplet=tup, full_measure=bool(n.rest and n.whole_measure_rest)))
+                            tuplet=tup, full_measure=bool(n.rest and n.whole_measure_rest),
+                            lyric=(n.lyric or None) if not n.rest else None))
         x += 1
     if not events:
-        return False
+        return None
     for v in {e.voice for e in events}:
         total = sum(e.duration for e in events if e.voice == v)
         if total != expected:
-            return False
+            return None
+    return events
+
+
+def _apply(m: Measure, fix: MeasureFix, staves: int) -> bool:
+    events = events_from_fix(fix, m.expected or Fraction(4), staves)
+    if events is None:
+        return False
     # keep ties that the vector reader saw on matching pitches
     old_start = {(p.step, p.octave) for e in m.events for p in e.pitches if p.tie_start}
     old_stop = {(p.step, p.octave) for e in m.events for p in e.pitches if p.tie_stop}
@@ -168,6 +177,10 @@ def _ask(client, image: bytes, part_name: str, m: Measure, staves: int, clefs: l
         f"Machine reading (durations in quarter notes):\n{reading or '(nothing)'}\n\n"
         f"Problems found: {'; '.join(m.warnings)}"
     )
+    return ask_claude(client, image, info)
+
+
+def ask_claude(client, image: bytes, info: str) -> MeasureFix:
     resp = client.messages.parse(
         model=MODEL,
         max_tokens=16000,

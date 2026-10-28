@@ -13,7 +13,9 @@ Als Eingabe gehen PDFs, Scans und Handyfotos.
 Ob ein PDF Notensatz-Daten enthält, erkennt das Programm selbst.
 
 Takte, deren Rhythmus nicht aufgeht, werden markiert. Mit der Option **Mit Claude prüfen** schickt der Server diese Takte als Bildausschnitt
-zusammen mit der eigenen Lesung an Claude und übernimmt die Korrektur nur, wenn sie rhythmisch stimmt.
+zusammen mit der eigenen Lesung an Claude und übernimmt die Korrektur nur, wenn sie rhythmisch stimmt. Das gilt für PDFs aus
+Notenprogrammen ebenso wie für Scans und Fotos; dort lohnt es sich besonders, weil die Notenerkennung öfter Fähnchen,
+Punkte oder Noten übersieht. Bei Fotos bleiben die erkannten Liedtexte erhalten.
 Dafür braucht der Server einen `ANTHROPIC_API_KEY`.
 
 ## Server starten (Docker, z. B. auf TrueNAS)

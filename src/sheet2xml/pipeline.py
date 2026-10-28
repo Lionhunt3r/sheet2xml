@@ -79,7 +79,7 @@ def convert(paths: list[str] | str, engine: str = "auto", review: bool = False, 
             if engine == "vector":
                 raise
             say(f"Direktes Auslesen fehlgeschlagen ({exc}); nutze Notenerkennung")
-            return _omr(paths, say)
+            return _omr(paths, say, review)
         reviewed = False
         if review:
             from .review import review_score
@@ -87,25 +87,30 @@ def convert(paths: list[str] | str, engine: str = "auto", review: bool = False, 
             say("Claude prüft auffällige Takte")
             reviewed = review_score(score, first, progress=say)
         return _result_from_score(score, reviewed)
-    return _omr(paths, say)
+    return _omr(paths, say, review)
 
 
-def _omr(paths: list[str], say) -> Result:
+def _omr(paths: list[str], say, review: bool = False) -> Result:
     from .omr import recognize_files
 
     say("Bild wird aufbereitet und mit Audiveris erkannt (kann 1–3 Minuten dauern)")
-    xml = recognize_files(paths)
-    return _result_from_omr(xml)
+    xml = recognize_files(paths, review=review, progress=say)
+    res = _result_from_omr(xml)
+    res.reviewed = review
+    return res
 
 
 def _result_from_omr(xml: str) -> Result:
     import xml.etree.ElementTree as ET
+
+    from .omr.review import find_problems
 
     res = Result(musicxml=xml, engine="omr")
     try:
         root = ET.fromstring(xml.encode("utf-8"))
     except ET.ParseError:
         return res
+    res.flagged_measures = len(find_problems(root))
     res.title = (root.findtext("work/work-title") or root.findtext("movement-title") or "").strip()
     res.parts = [(sp.findtext("part-name") or "").strip() or f"Stimme {i + 1}"
                  for i, sp in enumerate(root.iter("score-part"))]

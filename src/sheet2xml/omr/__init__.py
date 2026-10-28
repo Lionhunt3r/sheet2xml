@@ -27,8 +27,10 @@ def _pdf_to_images(pdf: str, out_dir: str, dpi: int = 300) -> list[str]:
     return paths
 
 
-def recognize_files(paths: list[str], preprocess: bool = True) -> str:
-    """Run OMR on one PDF or several images (the pages of one piece, in order)."""
+def recognize_files(paths: list[str], preprocess: bool = True, review: bool = False, progress=None) -> str:
+    """Run OMR on one PDF or several images (the pages of one piece, in order).
+
+    review: let Claude check measures whose rhythm does not add up."""
     with tempfile.TemporaryDirectory(prefix="sheet2xml-") as tmp:
         images: list[str] = []
         for path in paths:
@@ -58,5 +60,13 @@ def recognize_files(paths: list[str], preprocess: bool = True) -> str:
             page = doc.new_page(width=pix.width * 72 / 300, height=pix.height * 72 / 300)
             page.insert_image(page.rect, filename=img)
         doc.save(book)
-        texts = run_audiveris([book])
-        return merge_musicxml(texts)
+        keep = os.path.join(tmp, "omr")
+        os.makedirs(keep)
+        texts = run_audiveris([book], keep_dir=keep)
+        xml = merge_musicxml(texts)
+        projects = sorted(Path(keep).glob("*.omr"))
+        if review and len(texts) == 1 and len(projects) == 1:
+            from .review import review_omr
+
+            xml, _ = review_omr(xml, str(projects[0]), prepared, progress=progress)
+        return xml
