@@ -645,22 +645,36 @@ class SystemReader:
                 ]
                 lo = min((min(s.x0, s.x1) for s in hsegs), default=0.0)
                 hi = max((max(s.x0, s.x1) for s in hsegs), default=0.0)
-                if hsegs and not any(s.is_horizontal for s in hsegs):
-                    # a slanted line is a bracket only with a hook at one of its ends
-                    hooks = [
-                        s for s in self.pc.segments
-                        if abs(s.x1 - s.x0) < 0.2 * sp and 0.4 * sp < abs(s.y1 - s.y0) < 2 * sp
-                        and min(abs(s.x0 - lo), abs(s.x0 - hi)) < 0.3 * sp
-                        and abs((s.y0 + s.y1) / 2 - y) < 2 * sp
-                    ]
-                    if not hooks:
-                        hsegs = []
+                hooks = [
+                    s for s in self.pc.segments
+                    if hsegs and abs(s.x1 - s.x0) < 0.2 * sp and 0.4 * sp < abs(s.y1 - s.y0) < 2 * sp
+                    and min(abs(s.x0 - lo), abs(s.x0 - hi)) < 0.3 * sp
+                    and abs((s.y0 + s.y1) / 2 - y) < 2 * sp
+                ]
+                if hsegs and not hooks and not any(s.is_horizontal for s in hsegs):
+                    hsegs = []  # a slanted line is a bracket only with a hook at one of its ends
+                if hooks:
+                    # hooks point towards the notes: a bracket between two staves
+                    # belongs to the staff its hooks point at
+                    up = 0
+                    for h in hooks:
+                        ends = [(s.x0, s.y0) for s in hsegs] + [(s.x1, s.y1) for s in hsegs]
+                        ey = min(ends, key=lambda e: abs(e[0] - h.x0))[1]
+                        tip = max((h.y0, h.y1), key=lambda v: abs(v - ey))
+                        up += tip < ey
+                    points_up = up * 2 > len(hooks)
+                    bracket_y = sum((s.y0 + s.y1) / 2 for s in hsegs) / len(hsegs)
+                    if (points_up and st.top > bracket_y) or (not points_up and st.bottom < bracket_y):
+                        continue
                 if hsegs:
                     group = [c for c in chords if lo - 0.5 * sp <= c.x <= hi + 0.2 * sp]
-                    dirs = {c.direction for c in group if c.direction}
-                    if len(dirs) > 1:  # two voices: the bracket sits on its own voice's stem side
-                        side = "down" if y > st.middle else "up"
-                        group = [c for c in group if c.direction in (side, None)]
+                    # two voices sharing a beat: the bracket belongs to the voice on its stem side
+                    side = "down" if y > st.middle else "up"
+                    group = [
+                        c for c in group
+                        if c.direction in (side, None)
+                        or not any(o is not c and abs(o.x - c.x) < 0.5 * sp and o.direction == side for o in group)
+                    ]
                     group += [r for r in rests if lo - 0.5 * sp <= r.x <= hi + 0.2 * sp]
             if not group:
                 near = sorted(
