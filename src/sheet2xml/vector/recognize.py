@@ -1126,6 +1126,17 @@ class SystemReader:
                 for r in rests:
                     if lo < r.x < hi and r.tuplet is None and abs(r.x - x) < 6 * sp:
                         r.tuplet = (n, normal_n)
+                # a group short of n units starts or ends with a rest (8th rest + two 8ths under a "3")
+                members = [e for e in chords + rests if e.tuplet == (n, normal_n) and lo <= e.x <= hi]
+                unit = min((e.value for e in members if not getattr(e, "grace", False)), default=None)
+                if unit:
+                    missing = n * unit - sum(_dur(e.value, e.dots, None) for e in members)
+                    for r in sorted((r for r in rests if r.tuplet is None
+                                     and (lo - 4 * sp < r.x < lo or hi < r.x < hi + 4 * sp)),
+                                    key=lambda r: min(abs(r.x - lo), abs(r.x - hi))):
+                        if 0 < _dur(r.value, r.dots, None) <= missing:
+                            r.tuplet = (n, normal_n)
+                            missing -= _dur(r.value, r.dots, None)
 
     def _near_group(self, st: Staff, group, y: float, crowded_ok: bool = False) -> bool:
         """The tuplet number must sit next to its notes, not next to another staff's."""
