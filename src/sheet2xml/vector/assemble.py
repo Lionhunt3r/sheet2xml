@@ -273,6 +273,10 @@ def _cross_staff_runs(parts: list[Part]) -> None:
                 totals = [sum((e.duration for e in timed if e.voice == v), Fraction(0)) for v in (va, vb)]
                 if not all(0 < t < expected for t in totals) or sum(totals) != expected:
                     continue
+                sp = min((g[6] for g in getattr(m, "_geoms", [])), default=1.5)
+                if all(e.is_rest for e in timed) or any(
+                        abs(a.x - b.x) < 0.8 * sp for a in timed if a.voice == va for b in timed if b.voice == vb):
+                    continue  # both staves have something at the same time: not one run
                 keep = [e for e in m.events if e.voice not in (va, vb) or (e.grace and e in own)]
                 t = Fraction(0)
                 cur = {va: Fraction(0), vb: Fraction(0)}
