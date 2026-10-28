@@ -457,6 +457,7 @@ class SystemReader:
                 lines.append([tok])
         verse = 0
         last_y = 0.0
+        low = max([st.bottom] + [g.y for g in sc.glyphs if g.name.startswith("head.")])
         for line in lines:
             line.sort(key=lambda t: t[1])
             words = [w for *_, w in line if w.strip("-–_")]
@@ -481,8 +482,12 @@ class SystemReader:
                 e = min(cands, key=lambda e: (round(abs(e.x + 0.55 * sp - c) / (0.4 * sp)), e.voice))
                 used.add(id(e))
                 matched.append((e, text + ("-" if cont else "")))
+            # the first verse sits close under the staff (or its lowest notes), the next ones
+            # right under the previous verse
+            if line[0][0] - (last_y if verse else low) > (3.5 if verse else 6.5) * sp:
+                continue
             # a single syllable counts only right under an accepted verse (end of a second verse)
-            alone = len(matched) == len(sylls) == 1 and verse and line[0][0] - last_y < 3 * sp
+            alone = len(matched) == len(sylls) == 1 and verse
             if (len(matched) < 2 and not alone) or len(matched) < 0.6 * len(sylls):
                 continue
             verse += 1
