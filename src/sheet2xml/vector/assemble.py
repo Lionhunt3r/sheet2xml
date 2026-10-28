@@ -462,16 +462,38 @@ def _fill_metadata(score: Score, pages: list[PageContent], reads: list[SystemRea
     biggest = max(head, key=lambda t: t.size)
     same_line = [t for t in head if abs(t.origin_y - biggest.origin_y) < 2 and t.size >= biggest.size * 0.9]
     score.title = " ".join(t.text for t in sorted(same_line, key=lambda t: t.x0))
-    rest = [t for t in head if t not in same_line]
-    right = [t for t in rest if t.x1 > page.width * 0.65 and t.origin_y > biggest.origin_y - 5]
-    if right:
-        score.composer = "\n".join(t.text for t in sorted(right, key=lambda t: t.origin_y))
-    subs = [t for t in rest if t.size >= 0.6 * biggest.size and abs(t.cx - page.width / 2) < page.width * 0.2]
+    sp = reads[0].system.staves[0].space if reads else 2.0
+    # tempo marks and expressions sit just above the first staff
+    rest = [t for t in head if t not in same_line and t.origin_y < limit - 5 * sp and "=" not in t.text]
+    subs = [
+        t for t in rest
+        if t.size >= 0.6 * biggest.size and abs(t.cx - page.width / 2) < page.width * 0.2
+        and t.origin_y < biggest.origin_y + 4 * biggest.size
+    ]
     if subs:
         score.subtitle = " ".join(t.text for t in sorted(subs, key=lambda t: t.origin_y))
-    left = [t for t in rest if t.x0 < page.width * 0.3 and t.origin_y > biggest.origin_y - 5]
-    if left:
-        score.lyricist = "\n".join(t.text for t in sorted(left, key=lambda t: t.origin_y))
+    credits = [t for t in rest if t not in subs and (t.x1 > page.width * 0.65 or t.x0 < page.width * 0.3)]
+    composer: list[str] = []
+    lyricist: list[str] = []
+    arranger: list[str] = []
+    last: list[str] | None = None
+    for t in sorted(credits, key=lambda t: t.origin_y):
+        low = t.text.lower()
+        if last is not None and last[-1].rstrip().endswith((",", "&", "und")):
+            target = last  # continuation of the previous line
+        elif re.match(r"(text|worte|dichtung|lyrics|words|deutsch|übers|übertr)", low):
+            target = lyricist
+        elif re.match(r"(arr|aran|bearb|satz|orch|setting)", low):
+            target = arranger
+        elif t.x1 > page.width * 0.65:
+            target = composer
+        else:
+            continue
+        target.append(t.text)
+        last = target
+    score.composer = "\n".join(composer)
+    score.lyricist = "\n".join(lyricist)
+    score.arranger = "\n".join(arranger)
 
 
 def _single_part_name(score: Score, parts: list[Part], pages, reads) -> None:

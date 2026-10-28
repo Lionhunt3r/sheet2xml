@@ -80,9 +80,13 @@ class _Writer:
         if sc.subtitle:
             self.w("  <credit page=\"1\"><credit-type>subtitle</credit-type>"
                    f"<credit-words justify=\"center\" valign=\"top\">{escape(sc.subtitle)}</credit-words></credit>")
-        if sc.composer:
+        right = "\n".join(x for x in (sc.composer, sc.arranger) if x)
+        if right:
             self.w("  <credit page=\"1\"><credit-type>composer</credit-type>"
-                   f"<credit-words justify=\"right\" valign=\"top\">{escape(sc.composer)}</credit-words></credit>")
+                   f"<credit-words justify=\"right\" valign=\"top\">{escape(right)}</credit-words></credit>")
+        if sc.lyricist:
+            self.w("  <credit page=\"1\"><credit-type>lyricist</credit-type>"
+                   f"<credit-words justify=\"left\" valign=\"top\">{escape(sc.lyricist)}</credit-words></credit>")
         self.w("  <part-list>")
         for i, p in enumerate(sc.parts, start=1):
             self.w(f'    <score-part id="P{i}">')
