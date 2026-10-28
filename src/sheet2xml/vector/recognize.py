@@ -1312,8 +1312,8 @@ class SystemReader:
                 continue
             if not above and not t.italic:
                 continue
-            if above and st.top - t.origin_y > 6 * sp:
-                continue
+            if above and st.top - t.origin_y > (8 if t.bold else 6) * sp:
+                continue  # bold tempo marks may stand two lines high ("Andante" over "I. Satz")
             if above and st is top_staff and not t.bold and st.top - t.origin_y > 3 * sp:
                 continue  # page headers over the first staff of a page
             if out and out[-1].kind != "harmony" and out[-1].above == above \
