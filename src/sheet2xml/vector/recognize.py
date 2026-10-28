@@ -45,6 +45,14 @@ class Head:
     tie_stop: bool = False
 
 
+ARTICULATION = {
+    "art.accent": "accent",
+    "art.tenuto": "tenuto",
+    "art.staccato": "staccato",
+    "art.fermata": "fermata",
+}
+
+
 @dataclass
 class Chord:
     heads: list[Head]
@@ -58,6 +66,7 @@ class Chord:
     tuplet: tuple[int, int] | None = None
     beams: list[int] = field(default_factory=list)  # ids of beams attached
     voice: int = 1
+    articulations: list[str] = field(default_factory=list)
 
     @property
     def top(self) -> float:
@@ -136,9 +145,12 @@ def _key_alter(key: int, step: str) -> int:
 
 
 class SystemReader:
-    def __init__(self, pc: PageContent, system: System, carry: dict[int, dict]):
+    def __init__(self, pc: PageContent, system: System, carry: dict[int, dict], page_staves: list[Staff] | None = None):
         self.pc = pc
         self.system = system
+        # staves of the other systems on the page, so that symbols near them are left alone
+        own = {id(s) for s in system.staves}
+        self.other_staves = [s for s in (page_staves or []) if id(s) not in own]
         self.carry = carry  # per staff position in system order: last clef/key/time
         self.sp = sum(s.space for s in system.staves) / len(system.staves)
         self.warnings: list[str] = []
@@ -147,6 +159,7 @@ class SystemReader:
     def _assign(self) -> list[StaffContent]:
         sy = self.system
         contents = [StaffContent(staff=s) for s in sy.staves]
+        everything = contents + [StaffContent(staff=s) for s in self.other_staves]
         top_limit = sy.top - 8 * self.sp
         bottom_limit = sy.bottom + 8 * self.sp
         ledgers = [
@@ -159,16 +172,16 @@ class SystemReader:
                     continue
             if not (top_limit <= g.y <= bottom_limit):
                 continue
-            best = min(contents, key=lambda c: (c.staff.distance(g.y), abs(g.y - c.staff.middle)))
+            best = min(everything, key=lambda c: (c.staff.distance(g.y), abs(g.y - c.staff.middle)))
             if best.staff.distance(g.y) > 7 * best.staff.space:
                 continue
             if g.name.startswith("head.") and best.staff.distance(g.y) > 1.2 * best.staff.space:
-                best = self._ledger_owner(g, contents, ledgers) or best
+                best = self._ledger_owner(g, everything, ledgers) or best
             best.glyphs.append(g)
         for t in self.pc.texts:
             if not (top_limit <= t.origin_y <= bottom_limit):
                 continue
-            best = min(contents, key=lambda c: (c.staff.distance(t.origin_y), abs(t.origin_y - c.staff.middle)))
+            best = min(everything, key=lambda c: (c.staff.distance(t.origin_y), abs(t.origin_y - c.staff.middle)))
             best.texts.append(t)
         return contents
 
@@ -280,8 +293,11 @@ class SystemReader:
             carry["time_symbol"] = sc.time_symbol
 
         # ---- measure regions
-        bxs = sorted(b[0] for b in barlines if b[0] > st.x0 + 1.5 * sp)
-        bkinds = {round(b[0], 1): b[2] for b in barlines}
+        # split at the right line of double and final barlines: a crowded note
+        # may sit between the two lines but always belongs to the measure before
+        bxs = sorted(b[1] for b in barlines if b[0] > st.x0 + 1.5 * sp)
+        bkinds = {round(b[1], 1): b[2] for b in barlines}
+        bar_lines_x = [x for b in barlines for x in (b[0], b[1])]
         edges = [st.x0] + bxs
         if not bxs or bxs[-1] < st.x1 - 2 * sp:
             edges.append(st.x1 + 0.5 * sp)
@@ -289,7 +305,7 @@ class SystemReader:
 
         segs = self._segments_in(st)
         beams = self._beams_in(st)
-        stems = [s for s in segs if not any(abs(s.x0 - b) < 0.3 * sp for b in bxs)]
+        stems = [s for s in segs if not any(abs(s.x0 - b) < 0.3 * sp for b in bar_lines_x)]
 
         chords, rests = self._events(st, glyphs, stems, beams, normal, used_ids)
         self._ties(st, chords)
@@ -485,7 +501,31 @@ class SystemReader:
         dots = [g for g in glyphs if g.name == "dot"]
         targets = [(c.x, c) for c in chords] + [(r.x, r) for r in rests]
         targets.sort(key=lambda t: t[0])
+        heads_all = [(h.glyph, c) for c in chords for h in c.heads]
+
+        def over_head(g: Glyph, far: float) -> Chord | None:
+            """Chord whose notehead the glyph sits right above or below (articulation)."""
+            gc = (g.x + g.x1) / 2
+            best = None
+            for hg, c in heads_all:
+                dy = abs(hg.y - g.y)
+                if abs((hg.x + hg.x1) / 2 - gc) < 0.6 * sp and 0.6 * sp < dy < far * sp:
+                    if best is None or dy < best[0]:
+                        best = (dy, c)
+            return best[1] if best else None
+
+        for g in glyphs:
+            if g.name.startswith("art."):
+                c = over_head(g, 6.0)
+                kind = ARTICULATION.get(g.name)
+                if c is not None and kind and kind not in c.articulations:
+                    c.articulations.append(kind)
         for d in dots:
+            c = over_head(d, 4.0)
+            if c is not None:  # staccato, not an augmentation dot
+                if "staccato" not in c.articulations:
+                    c.articulations.append("staccato")
+                continue
             owner = None
             for x, t in targets:
                 if x >= d.x:
@@ -552,15 +592,29 @@ class SystemReader:
                 h = min(right, key=lambda p: abs(p[0].glyph.y - ymid))[0]
                 h.tie_stop = True
 
+    def _rehearsal_mark(self, t, sp: float) -> bool:
+        cx, cy = t.cx, (t.y0 + t.y1) / 2
+        for shape in [*self.pc.curves, *self.pc.polygons]:
+            if shape.x0 < cx < shape.x1 and shape.y0 < cy < shape.y1 and shape.x1 - shape.x0 < 4 * sp:
+                return True
+        return any(
+            o is not t and abs(o.origin_y - t.origin_y) < 0.3 * sp and len(o.text) > 2
+            and min(abs(o.x0 - t.x1), abs(t.x0 - o.x1)) < 3 * sp
+            for o in self.pc.texts
+        )
+
     def _tuplets(self, st, texts, glyphs, chords, rests, beams, segs, used_ids) -> None:
         sp = st.space
         numbers: list[tuple[float, float, int]] = []
         for g in glyphs:
             if g.name.startswith("tuplet."):
                 numbers.append((g.cx, g.y, int(g.name.split(".")[1])))
-        # tuplet numbers set in a text font (Sibelius) or as small time-signature digits
-        for t in texts:
-            if t.text in ("2", "3", "4", "5", "6", "7") and t.size < 3.2 * sp:
+        # tuplet numbers set in a text font (older Sibelius) or as small time-signature digits;
+        # not when the page has real tuplet glyphs, and never rehearsal marks (boxed or
+        # circled digits, or digits next to a tempo word)
+        text_tuplets = not any(g.name.startswith("tuplet.") for g in self.pc.glyphs)
+        for t in texts if text_tuplets else []:
+            if t.text in ("2", "3", "4", "5", "6", "7") and t.size < 3.2 * sp and not self._rehearsal_mark(t, sp):
                 numbers.append((t.cx, t.origin_y, int(t.text)))
         normal = _median([g.size for g in glyphs if g.name.startswith("head.")]) or 4 * sp
         for g in glyphs:
@@ -583,15 +637,30 @@ class SystemReader:
                         break
             if not group:
                 # bracket: horizontal segments next to the number
-                hsegs = [
+                hsegs = [  # brackets follow the notes, so they may slant
                     s for s in self.pc.segments
-                    if s.is_horizontal and abs((s.y0 + s.y1) / 2 - y) < 1.5 * sp and abs(s.x1 - s.x0) > 0.8 * sp
+                    if abs(s.y1 - s.y0) < 0.35 * abs(s.x1 - s.x0)
+                    and abs((s.y0 + s.y1) / 2 - y) < 1.5 * sp and abs(s.x1 - s.x0) > 0.8 * sp
                     and (abs(s.x1 - x) < 3 * sp or abs(s.x0 - x) < 3 * sp)
                 ]
+                lo = min((min(s.x0, s.x1) for s in hsegs), default=0.0)
+                hi = max((max(s.x0, s.x1) for s in hsegs), default=0.0)
+                if hsegs and not any(s.is_horizontal for s in hsegs):
+                    # a slanted line is a bracket only with a hook at one of its ends
+                    hooks = [
+                        s for s in self.pc.segments
+                        if abs(s.x1 - s.x0) < 0.2 * sp and 0.4 * sp < abs(s.y1 - s.y0) < 2 * sp
+                        and min(abs(s.x0 - lo), abs(s.x0 - hi)) < 0.3 * sp
+                        and abs((s.y0 + s.y1) / 2 - y) < 2 * sp
+                    ]
+                    if not hooks:
+                        hsegs = []
                 if hsegs:
-                    lo = min(min(s.x0, s.x1) for s in hsegs)
-                    hi = max(max(s.x0, s.x1) for s in hsegs)
                     group = [c for c in chords if lo - 0.5 * sp <= c.x <= hi + 0.2 * sp]
+                    dirs = {c.direction for c in group if c.direction}
+                    if len(dirs) > 1:  # two voices: the bracket sits on its own voice's stem side
+                        side = "down" if y > st.middle else "up"
+                        group = [c for c in group if c.direction in (side, None)]
                     group += [r for r in rests if lo - 0.5 * sp <= r.x <= hi + 0.2 * sp]
             if not group:
                 near = sorted(
@@ -721,6 +790,7 @@ class SystemReader:
                 ev = Event(
                     x=it.x, duration=_dur(it.value, it.dots, it.tuplet), pitches=pitches, voice=it.voice,
                     base=it.value, dots=it.dots, tuplet=it.tuplet, grace=it.grace, stem=it.direction,
+                    articulations=list(it.articulations),
                 )
                 if it.grace:
                     ev.duration = Fraction(0)

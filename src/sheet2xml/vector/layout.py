@@ -142,13 +142,18 @@ def find_staves(pc: PageContent) -> list[Staff]:
     return staves
 
 
-def _is_stem(seg: Segment, heads: list[Glyph], sp: float) -> bool:
+def _stem_head(seg: Segment, heads: list[Glyph], sp: float) -> Glyph | None:
+    """The notehead this vertical line could be the stem of, if any."""
     x = (seg.x0 + seg.x1) / 2
     y0, y1 = min(seg.y0, seg.y1), max(seg.y0, seg.y1)
+    best = None
     for h in heads:
         if h.x - 0.4 * sp <= x <= h.x + 1.8 * sp and (abs(h.y - y0) < 0.8 * sp or abs(h.y - y1) < 0.8 * sp):
-            return True
-    return False
+            d = min(abs(x - h.x), abs(x - h.x1))
+            if best is None or d < best[0]:
+                best = (d, h)
+    return best[1] if best else None
+
 
 
 def find_systems(pc: PageContent, staves: list[Staff]) -> list[System]:
@@ -290,15 +295,28 @@ def _system_barlines(sy: System, verticals: list[Segment], polygons: list[Polygo
     for p in polygons:  # thick final barlines drawn as filled rectangles
         if p.x1 - p.x0 < 1.0 * sp and p.y1 - p.y0 > 3.5 * sp:
             cands.append(((p.x0 + p.x1) / 2, p.y0, p.y1, p.x1 - p.x0))
-    for x, y0, y1, w in cands:
+    # a vertical line next to a notehead may be its stem; when several lines
+    # qualify for the same head, only the one closest to the head is the stem
+    stem_of: dict[int, list[tuple[float, int]]] = {}
+    spanning: list[tuple[float, float, Staff]] = []
+    for ci, (x, y0, y1, w) in enumerate(cands):
         if x < sy.x0 + 0.5 * sp or x > sy.x1 + 0.5 * sp:
             continue
         for s in sy.staves:
             if y0 <= s.top + 0.25 * s.space and y1 >= s.bottom - 0.25 * s.space:
-                seg = Segment(x, y0, x, y1, w)
-                if not _is_stem(seg, heads, s.space):
-                    xs.append((x, w))
+                spanning.append((ci, x, w))  # type: ignore[arg-type]
+                h = _stem_head(Segment(x, y0, x, y1, w), heads, s.space)
+                if h is not None:
+                    d = min(abs(x - h.x), abs(x - h.x1))
+                    stem_of.setdefault(id(h), []).append((d, ci))
                 break
+    stems: set[int] = set()
+    for v in stem_of.values():
+        d0 = min(v)[0]
+        stems |= {ci for d, ci in v if d - d0 < 0.2 * sp}  # a stem may be drawn twice
+    for ci, x, w in spanning:  # type: ignore[misc]
+        if ci not in stems:
+            xs.append((x, w))
     xs.sort()
     clusters: list[list[tuple[float, float]]] = []
     for x, w in xs:

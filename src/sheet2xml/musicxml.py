@@ -255,8 +255,11 @@ class _Writer:
                 nota += '<tied type="start"/>'
             if i == 0:
                 nota += self._tuplet_notation(e, tstart, tstop)
-                for a in e.articulations:
-                    nota += f"<articulations><{a}/></articulations>"
+                arts = [a for a in e.articulations if a != "fermata"]
+                if arts:
+                    nota += "<articulations>" + "".join(f"<{a}/>" for a in arts) + "</articulations>"
+                if "fermata" in e.articulations:
+                    nota += '<fermata type="upright"/>'
             if nota:
                 xml.append(f"<notations>{nota}</notations>")
             xml.append("</note>")

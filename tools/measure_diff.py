@@ -39,4 +39,5 @@ def main():
             print(i + 1, "REF", y)
 
 
-main()
+if __name__ == "__main__":
+    main()

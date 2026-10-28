@@ -142,7 +142,7 @@ def read_vector_pdf(path: str) -> Score:
             continue
         for sy in find_systems(pc, staves):
             # carry per staff index inside the system; refined below per part
-            reader = SystemReader(pc, sy, carry={})
+            reader = SystemReader(pc, sy, carry={}, page_staves=staves)
             reads.append(SystemRead(page=pc, system=sy, groups=[], labels=[]))
             reads[-1]._reader = reader  # type: ignore[attr-defined]
     if not reads:
