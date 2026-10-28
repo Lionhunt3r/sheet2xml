@@ -1358,10 +1358,43 @@ class SystemReader:
                 for c in maybe:
                     c.tuplet = None
         if self._voice_errors(events, expected):
+            alt = self._implied_tuplets(chords, rests, clef, key, clef_changes, expected, events)
+            if alt is not None:
+                events = alt
+        if self._voice_errors(events, expected):
             self._fill_hidden_rests(events, expected, sp)
         for v, total in self._voice_errors(events, expected):
             measure.warnings.append(f"voice {v}: {total} != {expected}")
         return events
+
+    def _implied_tuplets(self, chords, rests, clef, key, clef_changes, expected, events):
+        """A voice one triplet too long: a beamed group of three or six equal notes whose
+        number was printed out of reach (between two staves) or left out."""
+        over = {v: t - expected for v, t in self._voice_errors(events, expected) if t > expected}
+        if not over:
+            return None
+        groups: list[list[Chord]] = []
+        for c in sorted(chords, key=lambda c: c.x):
+            if not c.beams or c.grace or c.voice not in over:
+                continue
+            g = next((g for g in groups if set(c.beams) & {b for o in g for b in o.beams}), None)
+            if g is None:
+                groups.append([c])
+            else:
+                g.append(c)
+        cands = [g for g in groups if len(g) in (3, 6) and all(c.tuplet is None and not c.dots for c in g)
+                 and len({c.value for c in g}) == 1]
+        for g in cands:
+            if sum(c.value for c in g) / 3 != over[g[0].voice]:
+                continue
+            for c in g:
+                c.tuplet = (len(g), 2 if len(g) == 3 else 4)
+            alt = self._make_events(chords, rests, clef, key, clef_changes, expected)
+            if len(self._voice_errors(alt, expected)) < len(self._voice_errors(events, expected)):
+                return alt
+            for c in g:
+                c.tuplet = None
+        return None
 
     def _fill_hidden_rests(self, events, expected, sp) -> None:
         """Notation programs hide rests in secondary voices; put them back as invisible rests,

@@ -10,7 +10,7 @@ from ..model import Event, Measure, Part, Score
 from ..transpose import transposition_for
 from .extract import PageContent, extract
 from .layout import System, find_staves, find_systems
-from .recognize import StaffContent, SystemReader
+from .recognize import StaffContent, SystemReader, _hidden_rest
 
 
 @dataclass
@@ -227,6 +227,7 @@ def read_vector_pdf(path: str) -> Score:
     for p in parts:
         p.transpose = transposition_for(p.name)
     _stitch(score, parts, reads)
+    _cross_staff_runs(parts)
     _accept_partial_measures(parts)
     score.parts = parts
     return score
@@ -250,6 +251,52 @@ def _share_signatures(part_carry: list[dict], present: set, key_moves: list[int]
             c["time_symbol"] = symbols[0] if symbols else None
             if move and c.get("key") is not None:
                 c["key"] += move
+
+
+def _cross_staff_runs(parts: list[Part]) -> None:
+    """Runs that move between the two staves of a piano or harp (one beamed group below, the
+    next above): each staff on its own is too short, together they fill the measure in the
+    order they stand. Each staff gets its notes at their times and invisible rests between."""
+    for p in parts:
+        if p.staves < 2:
+            continue
+        for m in p.measures:
+            expected = m.expected
+            if not m.warnings or not expected:
+                continue
+            for s in range(1, p.staves):
+                va, vb = 1 + 4 * (s - 1), 1 + 4 * s
+                own = [e for e in m.events if e.voice in (va, vb)]
+                bar_rests = [e for e in own if e.is_rest and (e.full_measure or e.duration >= expected)]
+                timed = sorted((e for e in own if e not in bar_rests and not e.grace and not e.hidden),
+                               key=lambda e: e.x)
+                totals = [sum((e.duration for e in timed if e.voice == v), Fraction(0)) for v in (va, vb)]
+                if not all(0 < t < expected for t in totals) or sum(totals) != expected:
+                    continue
+                keep = [e for e in m.events if e.voice not in (va, vb) or (e.grace and e in own)]
+                t = Fraction(0)
+                cur = {va: Fraction(0), vb: Fraction(0)}
+                last_x = {va: 0.0, vb: 0.0}
+                for e in timed:
+                    if t > cur[e.voice]:
+                        keep.append(_hidden(e.x - 0.01, t - cur[e.voice], e.voice, e.staff))
+                    keep.append(e)
+                    t += e.duration
+                    cur[e.voice] = t
+                    last_x[e.voice] = e.x
+                for v, staff in ((va, s), (vb, s + 1)):
+                    if cur[v] < expected:
+                        keep.append(_hidden(last_x[v] + 0.01, expected - cur[v], v, staff))
+                m.events = keep
+            if all(sum((e.duration for e in m.events if e.voice == v and not e.grace), Fraction(0)) == expected
+                   for v in {e.voice for e in m.events}):
+                m.warnings = [w for w in m.warnings if not w.startswith("voice")]
+
+
+def _hidden(x: float, duration: Fraction, voice: int, staff: int) -> Event:
+    e = _hidden_rest(x, duration, voice)
+    e.staff = staff
+    return e
 
 
 def _voice_totals(m: Measure) -> set[Fraction]:
