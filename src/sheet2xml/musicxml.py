@@ -106,6 +106,7 @@ class _Writer:
     def part(self, idx: int, p: Part) -> None:
         self.w(f'  <part id="P{idx}">')
         self.clef_now: dict[int, object] = {}
+        self.in_word: dict[int, bool] = {}  # verse -> the last syllable continues the word
         pickup = False
         if p.measures:
             m0 = p.measures[0]
@@ -288,18 +289,20 @@ class _Writer:
                     nota += '<fermata type="upright"/>'
             if nota:
                 xml.append(f"<notations>{nota}</notations>")
-            if i == 0 and e.lyric:
-                xml.append(self._lyric(e.lyric))
+            if i == 0:
+                for verse, text in enumerate(e.lyrics, start=1):
+                    if text:
+                        xml.append(self._lyric(verse, text))
             xml.append("</note>")
             self.w("".join(xml))
 
-    def _lyric(self, text: str) -> str:
+    def _lyric(self, verse: int, text: str) -> str:
         """A syllable; a trailing '-' means the word goes on with the next note."""
         cont = text.endswith("-")
-        word = getattr(self, "in_word", False)
+        word = self.in_word.get(verse, False)
         syllabic = ("middle" if cont else "end") if word else ("begin" if cont else "single")
-        self.in_word = cont
-        return (f'<lyric number="1"><syllabic>{syllabic}</syllabic>'
+        self.in_word[verse] = cont
+        return (f'<lyric number="{verse}"><syllabic>{syllabic}</syllabic>'
                 f"<text>{escape(text.rstrip('-').strip())}</text></lyric>")
 
     @staticmethod

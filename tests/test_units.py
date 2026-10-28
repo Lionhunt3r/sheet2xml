@@ -79,3 +79,14 @@ def test_hidden_rests_complete_a_second_voice():
     v2 = sorted((e for e in ev if e.voice == 2), key=lambda e: e.x)
     assert [e.hidden for e in v2] == [True, False, True]
     assert sum(e.duration for e in v2) == 3
+
+
+def test_lyrics_syllables():
+    m = Measure(number=1, time=(2, 4), expected=Fraction(2))
+    m.events = [
+        Event(x=0, duration=Fraction(1), pitches=[Pitch("C", 5)], lyrics=["Lie-", "Got-"]),
+        Event(x=1, duration=Fraction(1), pitches=[Pitch("D", 5)], lyrics=["be", "tes"]),
+    ]
+    xml = to_musicxml(Score(title="T", parts=[Part(name="Ch", measures=[m])]))
+    assert '<lyric number="1"><syllabic>begin</syllabic><text>Lie</text></lyric>' in xml
+    assert '<lyric number="2"><syllabic>end</syllabic><text>tes</text></lyric>' in xml

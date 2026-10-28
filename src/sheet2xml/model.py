@@ -34,7 +34,7 @@ class Event:
     stem: str | None = None  # "up" / "down"
     articulations: list[str] = field(default_factory=list)
     notehead: str | None = None  # "slash" for rhythm slashes
-    lyric: str | None = None
+    lyrics: list[str] = field(default_factory=list)  # one syllable per verse ("" = none); "-" at the end: word goes on
     hidden: bool = False  # filler rest added to complete a voice
 
     @property

@@ -6,12 +6,24 @@ between two staff lines; most tolerances are expressed in it.
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
 from fractions import Fraction
 
 from ..model import Clef, Direction, Event, Measure, Pitch
 from .extract import Curve, Glyph, PageContent, Polygon, Segment, Text
 from .layout import Staff, System
+
+# chord symbols (C, F#m7, Bbmaj7/D, Fmin, n.c.) and playing instructions are not lyrics
+CHORD_NAME = re.compile(r"^([A-H][#b♯♭]?(m|min|maj|dim|aug|sus|add|M|°|ø|\+|-)?[0-9]*(\([^)]*\))?"
+                        r"(/[A-H][#b♯♭]?)?|n\.?c\.?|N\.?C\.?)$")
+NOT_LYRICS = {
+    "pizz", "arco", "div", "unis", "tutti", "solo", "soli", "trem", "col legno", "sul", "con sord", "senza sord",
+    "rit", "ritard", "rall", "accel", "a tempo", "cresc", "decresc", "dim", "simile", "legato", "stacc", "ten",
+    "espr", "dolce", "marc", "sempre", "poco", "molto", "subito", "sub", "fine", "coda", "segno", "tacet",
+    "1st only", "2nd only", "only", "1x", "2x", "opt", "ad lib", "gliss", "harm", "mute", "open", "loco",
+}
 
 HEAD_VALUE = {
     "head.breve": Fraction(8),
@@ -418,6 +430,67 @@ class SystemReader:
         while len(sc.measures) > 1 and not sc.measures[-1].events and regions[-1][1] > st.x1:
             sc.measures.pop()
         sc.header_end = x_after
+        self._lyrics(st, sc)
+
+    def _lyrics(self, st: Staff, sc: StaffContent) -> None:
+        """Lyrics: lines of upright text below the staff whose syllables sit under its notes."""
+        sp = st.space
+        notes = [e for m in sc.measures for e in m.events if not e.is_rest and not e.grace]
+        if not notes:
+            return
+        below = [o.top for o in self.system.staves + self.other_staves if o.top > st.bottom + sp]
+        limit = min(below + [st.bottom + 14 * sp])
+        tokens = []
+        for t in self.pc.texts:
+            if not (st.bottom + 0.8 * sp < t.origin_y < limit) or t.italic or t.bold:
+                continue
+            if not (st.x0 - sp < t.cx < st.x1 + sp):
+                continue
+            for w, x0, x1 in t.words or [(t.text, t.x0, t.x1)]:
+                tokens.append((t.origin_y, x0, x1, w))
+        tokens.sort()
+        lines: list[list[tuple]] = []
+        for tok in tokens:
+            if lines and abs(tok[0] - lines[-1][0][0]) < 0.4 * sp:
+                lines[-1].append(tok)
+            else:
+                lines.append([tok])
+        verse = 0
+        last_y = 0.0
+        for line in lines:
+            line.sort(key=lambda t: t[1])
+            words = [w for *_, w in line if w.strip("-–_")]
+            if not words or sum(1 for w in words if CHORD_NAME.match(w) or w.lower().strip(".") in NOT_LYRICS) * 2 >= len(words):
+                continue  # chord symbols over the next staff, playing instructions
+            sylls: list[list] = []  # [text, x0, x1, continues]
+            for _, x0, x1, w in line:
+                if w.strip("-–_") == "":
+                    if "-" in w or "–" in w:
+                        if sylls:
+                            sylls[-1][3] = True
+                    continue
+                cont = w.endswith(("-", "–"))
+                sylls.append([w.strip("-–"), x0, x1, cont])
+            matched = []
+            used: set[int] = set()
+            for text, x0, x1, cont in sylls:
+                c = (x0 + x1) / 2
+                cands = [e for e in notes if id(e) not in used and abs(e.x + 0.55 * sp - c) < 2.5 * sp]
+                if not cands:
+                    continue
+                e = min(cands, key=lambda e: (round(abs(e.x + 0.55 * sp - c) / (0.4 * sp)), e.voice))
+                used.add(id(e))
+                matched.append((e, text + ("-" if cont else "")))
+            # a single syllable counts only right under an accepted verse (end of a second verse)
+            alone = len(matched) == len(sylls) == 1 and verse and line[0][0] - last_y < 3 * sp
+            if (len(matched) < 2 and not alone) or len(matched) < 0.6 * len(sylls):
+                continue
+            verse += 1
+            last_y = line[0][0]
+            for e, text in matched:
+                while len(e.lyrics) < verse:
+                    e.lyrics.append("")
+                e.lyrics[verse - 1] = text
 
     # ------------------------------------------------------------------ pieces
     def _key_signature(self, accs, heads, x_start, limit, sp, max_start=4.0 * 4):

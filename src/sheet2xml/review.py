@@ -137,7 +137,7 @@ def events_from_fix(fix: MeasureFix, expected: Fraction, staves: int) -> list[Ev
             return None
         events.append(Event(x=x, duration=d, pitches=pitches, voice=voice, staff=staff, base=base, dots=n.dots,
                             tuplet=tup, full_measure=bool(n.rest and n.whole_measure_rest),
-                            lyric=(n.lyric or None) if not n.rest else None))
+                            lyrics=[n.lyric] if n.lyric and not n.rest else []))
         x += 1
     if not events:
         return None

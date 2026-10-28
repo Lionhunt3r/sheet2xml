@@ -41,6 +41,7 @@ class Text:
     size: float
     font: str
     origin_y: float
+    words: list[tuple[str, float, float]] = field(default_factory=list)  # (word, x0, x1)
 
     @property
     def cx(self) -> float:
@@ -149,6 +150,7 @@ def extract_page(page: pymupdf.Page) -> PageContent:
                         Text(
                             text=t, x0=xs0, y0=span["bbox"][1], x1=xs1, y1=span["bbox"][3],
                             size=span["size"], font=font, origin_y=chunk[0]["origin"][1],
+                            words=_words(chunk),
                         )
                     )
 
@@ -213,6 +215,18 @@ def _is_axis_rect(pts) -> bool:
     xs = sorted(set(round(p[0], 1) for p in pts))
     ys = sorted(set(round(p[1], 1) for p in pts))
     return len(xs) <= 2 or len(ys) <= 2
+
+
+def _words(chars) -> list[tuple[str, float, float]]:
+    out, cur = [], []
+    for c in chars + [{"c": " "}]:
+        if c["c"].isspace():
+            if cur:
+                out.append(("".join(x["c"] for x in cur), cur[0]["bbox"][0], cur[-1]["bbox"][2]))
+            cur = []
+        else:
+            cur.append(c)
+    return out
 
 
 def _split_chars(chars, size):

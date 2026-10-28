@@ -372,10 +372,15 @@ def _stitch(score: Score, parts: list[Part], reads: list[SystemRead]) -> None:
                 rest_len = tmpl[0]
                 m = Measure(number=0)
                 for s in range(1, part.staves + 1):
-                    m.events.append(Event(x=0, duration=rest_len, staff=s, base=Fraction(4), full_measure=True))
+                    m.events.append(Event(x=0, duration=rest_len, staff=s, voice=4 * (s - 1) + 1,
+                                          base=Fraction(4), full_measure=True))
                 m.expected = rest_len
                 m._time = tmpl[1]  # type: ignore[attr-defined]
+                if tmpl[2] is not None:
+                    m._key = tmpl[2]  # type: ignore[attr-defined]
+                m._filler = True  # type: ignore[attr-defined]
                 _expand(part, m, expansions[mi])
+    _fill_hidden_staves(parts)
     # number measures, compute time/key changes per part
     for part in parts:
         prev_time = None
@@ -408,13 +413,46 @@ def _stitch(score: Score, parts: list[Part], reads: list[SystemRead]) -> None:
                 p.measures.append(m)
 
 
+def _fill_hidden_staves(parts: list[Part]) -> None:
+    """Staves of a part that some systems leave out (empty staves hidden) get rests there,
+    and every staff starts with the clef it shows when it first appears."""
+    for part in parts:
+        if not part.measures:
+            continue
+        first: dict[int, object] = {}
+        for m in part.measures:
+            for s, c in m.clefs.items():
+                first.setdefault(s, c)
+        for s, c in first.items():
+            part.measures[0].clefs.setdefault(s, c)
+        # a hidden part keeps its own key (transposing instruments differ from the template)
+        nxt = None
+        for m in reversed(part.measures):
+            if getattr(m, "_filler", False):
+                if nxt is not None:
+                    m._key = nxt  # type: ignore[attr-defined]
+            elif hasattr(m, "_key"):
+                nxt = m._key  # type: ignore[attr-defined]
+        if part.staves < 2:
+            continue
+        for m in part.measures:
+            have = {e.staff for e in m.events}
+            if not have:
+                continue
+            length = max(sum(e.duration for e in m.events if e.voice == v) for v in {e.voice for e in m.events})
+            for s in range(1, part.staves + 1):
+                if s not in have:
+                    m.events.append(Event(x=0, duration=length, staff=s, voice=4 * (s - 1) + 1,
+                                          base=Fraction(4), full_measure=True))
+
+
 def _template_measure(sr: SystemRead, mi: int):
     for g in sr.groups:
         for sc in g:
             if mi < len(sc.measures):
                 m = sc.measures[mi]
-                return m.expected or Fraction(4), getattr(m, "_time", (4, 4))
-    return Fraction(4), (4, 4)
+                return m.expected or Fraction(4), getattr(m, "_time", (4, 4)), getattr(m, "_key", None)
+    return Fraction(4), (4, 4), None
 
 
 def _merge_staff(dst: Measure, src: Measure, staff: int) -> None:
