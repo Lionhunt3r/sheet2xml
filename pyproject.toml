@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sheet2xml"
+version = "0.1.0"
+description = "Noten aus PDFs, Scans und Fotos in MusicXML für Sibelius, MuseScore, Dorico und Finale umwandeln"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "pymupdf>=1.24",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.9",
+    "pillow>=10",
+    "pillow-heif>=0.16",
+]
+
+[project.optional-dependencies]
+review = ["anthropic>=0.70", "pydantic>=2.6"]
+server = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "python-multipart>=0.0.9", "anthropic>=0.70", "pydantic>=2.6"]
+dev = ["pytest>=8", "music21>=9"]
+
+[project.scripts]
+sheet2xml = "sheet2xml.cli:main"
+sheet2xml-server = "sheet2xml.web.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sheet2xml = ["web/static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

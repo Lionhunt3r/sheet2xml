@@ -1,0 +1,10 @@
+{
+  "name": "sheet2xml",
+  "short_name": "sheet2xml",
+  "description": "Noten in MusicXML umwandeln",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6f5f2",
+  "theme_color": "#1f3a5f",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}

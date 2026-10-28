@@ -1,0 +1,452 @@
+"""Read a whole vector PDF: pages -> systems -> parts with continuous measures."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from fractions import Fraction
+
+from ..model import Event, Measure, Part, Score
+from ..transpose import transposition_for
+from .extract import PageContent, extract
+from .layout import System, find_staves, find_systems
+from .recognize import StaffContent, SystemReader
+
+
+@dataclass
+class SystemRead:
+    page: PageContent
+    system: System
+    groups: list[list[StaffContent]]  # staves grouped into instruments
+    labels: list[str]
+
+
+def _norm(s: str) -> str:
+    s = s.lower().replace("ä", "a").replace("ö", "o").replace("ü", "u").replace("ß", "ss")
+    return re.sub(r"[^a-z0-9 ]", " ", s)
+
+
+_ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "1": 1, "2": 2, "3": 3, "4": 4}
+
+
+def _label_score(label: str, name: str) -> float:
+    """How well an (abbreviated) staff label matches a full instrument name."""
+    a, b = _norm(label).split(), _norm(name).split()
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 3.0
+    num_a = [_ROMAN[t] for t in a if t in _ROMAN]
+    num_b = [_ROMAN[t] for t in b if t in _ROMAN]
+    words_a = [t for t in a if t not in _ROMAN]
+    words_b = [t for t in b if t not in _ROMAN]
+    if num_a != num_b:
+        return 0.1 if words_a and words_b and words_a[0][:1] == words_b[0][:1] else 0.0
+    if not words_a or not words_b:
+        return 1.0
+    wa, wb = words_a[0], " ".join(words_b)
+    if wa[0] != wb[0]:
+        return 0.0
+    # abbreviation letters must appear in order in the full name
+    i = 0
+    for ch in wa:
+        i = wb.find(ch, i)
+        if i < 0:
+            return 0.2
+        i += 1
+    return 2.0
+
+
+def _label_blocks(page: PageContent, system: System) -> list[tuple[float, str]]:
+    """Instrument names left of the system, merged over line breaks: (y, text)."""
+    sp = system.staves[0].space
+    texts = [
+        t for t in page.texts
+        if t.x1 <= system.x0 + 0.5 * sp and system.top - 3 * sp <= t.origin_y <= system.bottom + 3 * sp
+        and not t.text.isdigit()
+    ]
+    texts.sort(key=lambda t: (t.origin_y, t.x0))
+    blocks: list[list] = []
+    for t in texts:
+        if blocks:
+            last = blocks[-1]
+            lt = last[-1]
+            same_line = abs(t.origin_y - lt.origin_y) < 0.5 * t.size
+            next_line = 0 < t.origin_y - lt.origin_y < 1.5 * max(t.size, lt.size) and abs(t.cx - lt.cx) < 6 * sp
+            if same_line or next_line:
+                last.append(t)
+                continue
+        blocks.append([t])
+    out = []
+    for b in blocks:
+        y = (min(t.y0 for t in b) + max(t.y1 for t in b)) / 2
+        out.append((y, " ".join(t.text for t in b).strip()))
+    return out
+
+
+def _group_staves(contents: list[StaffContent], system: System, page: PageContent):
+    """Group staves into instruments and name each group. Returns (groups, labels)."""
+    n = len(contents)
+    own: list[list[str]] = [[] for _ in range(n)]
+    between: dict[int, list[str]] = {}
+    for y, text in _label_blocks(page, system):
+        placed = False
+        for i, c in enumerate(contents):
+            st = c.staff
+            if st.top - 1.0 * st.space <= y <= st.bottom + 1.0 * st.space:
+                own[i].append(text)
+                placed = True
+                break
+        if placed:
+            continue
+        for i in range(n - 1):
+            if contents[i].staff.bottom < y < contents[i + 1].staff.top:
+                between.setdefault(i, []).append(text)
+                break
+    groups: list[list[StaffContent]] = []
+    labels: list[str] = []
+    braces = sorted(system.braces)
+    i = 0
+    while i < n:
+        br = next((b for b in braces if b[0] == i and b[1] - b[0] <= 3), None)
+        if br:
+            idx = list(range(br[0], br[1] + 1))
+            names = [t for k in idx for t in own[k]] + [t for k in idx[:-1] for t in between.get(k, [])]
+            if len(names) <= 1:
+                groups.append([contents[k] for k in idx])
+                labels.append(names[0] if names else "")
+                i = br[1] + 1
+                continue
+        if not own[i] and i + 1 < n and between.get(i) and not own[i + 1]:
+            groups.append([contents[i], contents[i + 1]])
+            labels.append(between[i][0])
+            i += 2
+            continue
+        groups.append([contents[i]])
+        labels.append(own[i][0] if own[i] else "")
+        i += 1
+    for g, lb in zip(groups, labels):
+        for c in g:
+            c.label = lb
+    return groups, labels
+
+
+def read_vector_pdf(path: str) -> Score:
+    pages = extract(path)
+    score = Score(source="vector")
+    reads: list[SystemRead] = []
+    carry_by_part: dict[int, dict] = {}
+    for pc in pages:
+        staves = find_staves(pc)
+        if not staves:
+            continue
+        for sy in find_systems(pc, staves):
+            # carry per staff index inside the system; refined below per part
+            reader = SystemReader(pc, sy, carry={})
+            reads.append(SystemRead(page=pc, system=sy, groups=[], labels=[]))
+            reads[-1]._reader = reader  # type: ignore[attr-defined]
+    if not reads:
+        raise ValueError("Keine Notensysteme im PDF gefunden")
+
+    _fill_metadata(score, pages, reads)
+
+    parts: list[Part] = []
+    part_carry: list[dict] = []
+    for sr in reads:
+        reader: SystemReader = sr._reader  # type: ignore[attr-defined]
+        contents_pre = reader._assign()
+        # read staves one by one so the clef/key/time context follows the instrument
+        groups, labels = _group_staves(contents_pre, sr.system, sr.page)
+        mapping = _map_groups(parts, groups, labels, sr is reads[0])
+        for gi, grp in enumerate(groups):
+            pi = mapping[gi]
+            if pi is None and parts and sr is not reads[0]:
+                used = {x for x in mapping if x is not None}
+                free = [k for k in range(len(parts)) if k not in used]
+                if not free:
+                    score.warnings.append(f"Notenzeile '{labels[gi]}' konnte keiner Stimme zugeordnet werden")
+                    mapping[gi] = -1
+                    continue
+                lo = max([x for x in mapping[:gi] if x is not None and x >= 0], default=-1)
+                pi = min(free, key=lambda k: (k <= lo, abs(k - lo - 1)))
+                mapping[gi] = pi
+            if pi is None:
+                parts.append(Part(name=labels[gi] or f"Stimme {len(parts) + 1}", staves=len(grp)))
+                part_carry.append({})
+                pi = len(parts) - 1
+                mapping[gi] = pi
+            part = parts[pi]
+            if labels[gi] and not part.abbreviation and labels[gi] != part.name:
+                part.abbreviation = labels[gi]
+            part.staves = max(part.staves, len(grp))
+            for si, sc in enumerate(grp):
+                carry = part_carry[pi].setdefault(si, {})
+                reader.carry = {0: carry}
+                reader._read_staff(0, sc, sr.system.barlines)
+        sr.groups = groups
+        sr.labels = labels
+        sr._mapping = mapping  # type: ignore[attr-defined]
+
+    _single_part_name(score, parts, pages, reads)
+    for p in parts:
+        p.transpose = transposition_for(p.name)
+    _stitch(score, parts, reads)
+    _accept_partial_measures(parts)
+    score.parts = parts
+    return score
+
+
+def _voice_totals(m: Measure) -> set[Fraction]:
+    return {sum((e.duration for e in m.events if e.voice == v), Fraction(0)) for v in {e.voice for e in m.events}}
+
+
+def _accept_partial_measures(parts: list[Part]) -> None:
+    """A short first measure (pickup) and a short last measure are normal, not errors.
+
+    They count only if every part agrees on the same shorter length."""
+    for idx in (0, -1):
+        lengths = set()
+        for p in parts:
+            if not p.measures:
+                return
+            m = p.measures[idx]
+            totals = _voice_totals(m)
+            if any(e.full_measure for e in m.events):
+                continue
+            if len(totals) != 1:
+                return
+            lengths |= totals
+        if len(lengths) != 1 or not all(0 < t < (p.measures[idx].expected or 0) for p in parts for t in lengths):
+            continue
+        for p in parts:
+            p.measures[idx].warnings = [w for w in p.measures[idx].warnings if not w.startswith("voice")]
+
+
+def _map_groups(parts: list[Part], groups, labels, first: bool) -> list[int | None]:
+    """Map the instrument groups of a system onto the known parts.
+
+    Only the first system creates parts (it normally shows every instrument);
+    later systems are aligned to them in order, using the labels."""
+    n = len(groups)
+    if not parts:
+        return [None] * n
+    m = len(parts)
+
+    def sim(i: int, j: int) -> float:
+        lb = labels[i]
+        p = parts[j]
+        s = max(_label_score(lb, p.name), _label_score(lb, p.abbreviation or "")) if lb else 0.6
+        if len(groups[i]) != p.staves:
+            s -= 1.0
+        return s
+
+    if n == m and all(sim(i, i) > 0.3 for i in range(n)):
+        return list(range(n))
+    NEG = -1e9
+    dp = [[NEG] * (m + 1) for _ in range(n + 1)]
+    back: list[list] = [[None] * (m + 1) for _ in range(n + 1)]
+    for j in range(m + 1):
+        dp[0][j] = 0.0
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            if dp[i][j - 1] > dp[i][j]:
+                dp[i][j] = dp[i][j - 1]
+                back[i][j] = ("skip", None)
+            v = dp[i - 1][j - 1] + sim(i - 1, j - 1)
+            if v > dp[i][j]:
+                dp[i][j] = v
+                back[i][j] = ("take", j - 1)
+    out: list[int | None] = [None] * n
+    i, j = n, m
+    while i > 0 and j > 0:
+        step = back[i][j]
+        if step is None:
+            break
+        if step[0] == "take":
+            out[i - 1] = step[1]
+            i, j = i - 1, j - 1
+        else:
+            j -= 1
+    return out
+
+
+def _stitch(score: Score, parts: list[Part], reads: list[SystemRead]) -> None:
+    """Concatenate measures system by system; fill parts missing from a system."""
+    number = 1
+    last_time: tuple[int, int] = (4, 4)
+    for sr in reads:
+        mapping = sr._mapping  # type: ignore[attr-defined]
+        # number of measures in this system = max over staves
+        counts = [len(sc.measures) for g in sr.groups for sc in g]
+        if not counts:
+            continue
+        n = max(counts)
+        expansions: list[int] = [1] * n
+        for g in sr.groups:
+            for sc in g:
+                for mi, m in enumerate(sc.measures):
+                    expansions[mi] = max(expansions[mi], m.rest_measures)
+        present = set()
+        for gi, g in enumerate(sr.groups):
+            pi = mapping[gi]
+            if pi is None or pi < 0:
+                continue
+            present.add(pi)
+            part = parts[pi]
+            for mi in range(n):
+                merged = Measure(number=0)
+                ref = None
+                for si, sc in enumerate(g):
+                    if mi < len(sc.measures):
+                        m = sc.measures[mi]
+                    else:
+                        m = Measure(number=0)
+                        m.warnings.append("missing measure")
+                    ref = ref or m
+                    _merge_staff(merged, m, si + 1)
+                _expand(part, merged, expansions[mi])
+                last_time = getattr(ref, "_time", last_time) if ref is not None else last_time
+        for pi, part in enumerate(parts):
+            if pi in present:
+                continue
+            # part hidden in this system (empty staves hidden): add full-measure rests
+            for mi in range(n):
+                tmpl = _template_measure(sr, mi)
+                rest_len = tmpl[0]
+                m = Measure(number=0)
+                for s in range(1, part.staves + 1):
+                    m.events.append(Event(x=0, duration=rest_len, staff=s, base=Fraction(4), full_measure=True))
+                m.expected = rest_len
+                m._time = tmpl[1]  # type: ignore[attr-defined]
+                _expand(part, m, expansions[mi])
+    # number measures, compute time/key changes per part
+    for part in parts:
+        prev_time = None
+        prev_key = None
+        for i, m in enumerate(part.measures, start=1):
+            m.number = i
+            t = getattr(m, "_time", None)
+            k = getattr(m, "_key", None)
+            if t and t != prev_time:
+                m.time = t
+                m.time_symbol = getattr(m, "_time_symbol", None)
+                prev_time = t
+            elif m.time == prev_time:
+                m.time = None
+            if k is not None and k != prev_key:
+                m.key = k
+                prev_key = k
+            else:
+                m.key = None if i > 1 else m.key
+    lengths = {len(p.measures) for p in parts}
+    if len(lengths) > 1:
+        score.warnings.append(f"Stimmen haben unterschiedlich viele Takte: {sorted(lengths)}")
+        longest = max(lengths)
+        for p in parts:
+            while len(p.measures) < longest:
+                last = p.measures[-1] if p.measures else None
+                exp = last.expected if last else Fraction(4)
+                m = Measure(number=len(p.measures) + 1, expected=exp)
+                m.events.append(Event(x=0, duration=exp, base=Fraction(4), full_measure=True))
+                p.measures.append(m)
+
+
+def _template_measure(sr: SystemRead, mi: int):
+    for g in sr.groups:
+        for sc in g:
+            if mi < len(sc.measures):
+                m = sc.measures[mi]
+                return m.expected or Fraction(4), getattr(m, "_time", (4, 4))
+    return Fraction(4), (4, 4)
+
+
+def _merge_staff(dst: Measure, src: Measure, staff: int) -> None:
+    if hasattr(src, "_geom"):
+        geoms = getattr(dst, "_geoms", [])
+        geoms.append((staff,) + src._geom)  # type: ignore[attr-defined]
+        dst._geoms = geoms  # type: ignore[attr-defined]
+    for e in src.events:
+        e.staff = staff
+        if staff > 1:
+            e.voice += 4 * (staff - 1)
+        dst.events.append(e)
+    for x, _, c in src.clef_changes:
+        dst.clef_changes.append((x, staff, c))
+    for c in src.clefs.values():
+        dst.clefs[staff] = c
+    for d in src.directions:
+        d.staff = staff
+        dst.directions.append(d)
+    if staff == 1:
+        dst.time = src.time
+        dst.time_symbol = src.time_symbol
+        dst.key = src.key
+        dst.expected = src.expected
+        dst.barline = src.barline
+        dst.rest_measures = src.rest_measures
+        for attr in ("_time", "_time_symbol", "_key"):
+            if hasattr(src, attr):
+                setattr(dst, attr, getattr(src, attr))
+    dst.warnings.extend(src.warnings)
+
+
+def _expand(part: Part, m: Measure, count: int) -> None:
+    if count <= 1:
+        part.measures.append(m)
+        return
+    # a multi-measure rest becomes `count` empty measures
+    for k in range(count):
+        mm = Measure(number=0, expected=m.expected)
+        for attr in ("_time", "_time_symbol", "_key"):
+            if hasattr(m, attr):
+                setattr(mm, attr, getattr(m, attr))
+        if k == 0:
+            mm.clefs = m.clefs
+            mm.time, mm.key, mm.time_symbol = m.time, m.key, m.time_symbol
+            mm.directions = m.directions
+        if k == count - 1:
+            mm.barline = m.barline
+        for s in range(1, part.staves + 1):
+            mm.events.append(Event(x=0, duration=m.expected or Fraction(4), staff=s, base=Fraction(4),
+                                   full_measure=True, voice=1 + 4 * (s - 1)))
+        part.measures.append(mm)
+
+
+def _fill_metadata(score: Score, pages: list[PageContent], reads: list[SystemRead]) -> None:
+    first = pages[0]
+    first_staff_top = None
+    for sr in reads:
+        if sr.page is first or first_staff_top is None:
+            first_staff_top = sr.system.top if first_staff_top is None else first_staff_top
+            break
+    page = reads[0].page if reads else first
+    limit = reads[0].system.top if reads else page.height / 3
+    head = [t for t in page.texts if t.origin_y < limit and len(t.text) > 1]
+    if not head:
+        return
+    biggest = max(head, key=lambda t: t.size)
+    same_line = [t for t in head if abs(t.origin_y - biggest.origin_y) < 2 and t.size >= biggest.size * 0.9]
+    score.title = " ".join(t.text for t in sorted(same_line, key=lambda t: t.x0))
+    rest = [t for t in head if t not in same_line]
+    right = [t for t in rest if t.x1 > page.width * 0.65 and t.origin_y > biggest.origin_y - 5]
+    if right:
+        score.composer = "\n".join(t.text for t in sorted(right, key=lambda t: t.origin_y))
+    subs = [t for t in rest if t.size >= 0.6 * biggest.size and abs(t.cx - page.width / 2) < page.width * 0.2]
+    if subs:
+        score.subtitle = " ".join(t.text for t in sorted(subs, key=lambda t: t.origin_y))
+    left = [t for t in rest if t.x0 < page.width * 0.3 and t.origin_y > biggest.origin_y - 5]
+    if left:
+        score.lyricist = "\n".join(t.text for t in sorted(left, key=lambda t: t.origin_y))
+
+
+def _single_part_name(score: Score, parts: list[Part], pages, reads) -> None:
+    if len(parts) != 1 or not parts[0].name.startswith("Stimme"):
+        return
+    page = reads[0].page
+    top = reads[0].system.top
+    cands = [
+        t for t in page.texts
+        if t.origin_y < top and t.x0 < page.width * 0.35 and len(t.text) > 2 and t.text not in score.title
+    ]
+    if cands:
+        parts[0].name = min(cands, key=lambda t: t.origin_y).text
