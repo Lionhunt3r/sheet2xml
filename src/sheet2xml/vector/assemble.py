@@ -194,6 +194,7 @@ def read_vector_pdf(path: str) -> Score:
         reader = sr._reader  # type: ignore[attr-defined]
         groups, labels = layouts[k]
         mapping = mappings[k]
+        key_moves = []
         for gi, grp in enumerate(groups):
             pi = mapping[gi]
             if labels[gi]:
@@ -202,8 +203,13 @@ def read_vector_pdf(path: str) -> Score:
             part.staves = max(part.staves, len(grp))
             for si, sc in enumerate(grp):
                 carry = part_carry[pi].setdefault(si, {})
+                key_before = carry.get("key")
                 reader.carry = {0: carry}
                 reader._read_staff(0, sc, sr.system.barlines)
+                if key_before is not None and carry.get("key") is not None:
+                    key_moves.append(carry["key"] - key_before)
+        _share_signatures(part_carry, {mapping[gi] for gi in range(len(groups))}, key_moves,
+                          [p.staves for p in parts])
         sr.groups = groups
         sr.labels = labels
         sr._mapping = mapping  # type: ignore[attr-defined]
@@ -224,6 +230,26 @@ def read_vector_pdf(path: str) -> Score:
     _accept_partial_measures(parts)
     score.parts = parts
     return score
+
+
+def _share_signatures(part_carry: list[dict], present: set, key_moves: list[int], staves: list[int]) -> None:
+    """Time and key changes made while a part's staves were hidden still apply to it: the time
+    signature the system's staves agree on, and the key moved by the same number of fifths."""
+    times = [c["time"] for pi in present for c in part_carry[pi].values() if c.get("time")]
+    if not times:
+        return
+    time = max(set(times), key=times.count)
+    symbols = [c.get("time_symbol") for pi in present for c in part_carry[pi].values() if c.get("time") == time]
+    move = max(set(key_moves), key=key_moves.count) if key_moves else 0
+    for pi, carries in enumerate(part_carry):
+        if pi in present:
+            continue
+        for si in range(staves[pi]):
+            c = carries.setdefault(si, {})
+            c["time"] = time
+            c["time_symbol"] = symbols[0] if symbols else None
+            if move and c.get("key") is not None:
+                c["key"] += move
 
 
 def _voice_totals(m: Measure) -> set[Fraction]:
