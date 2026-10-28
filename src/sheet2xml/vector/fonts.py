@@ -85,6 +85,7 @@ SONATA_DYN: dict[str, str] = {
 
 # --- SMuFL mapping (code point -> name) ---
 SMUFL: dict[int, str] = {
+    0xE220: "trem.1", 0xE221: "trem.2", 0xE222: "trem.3", 0xE223: "trem.4", 0xE224: "trem.5",
     0xE510: "ottava.8", 0xE511: "ottava.8", 0xE512: "ottava.8vb", 0xE51C: "ottava.8vb",
     0xE514: "ottava.15", 0xE515: "ottava.15", 0xE516: "ottava.15mb", 0xE51D: "ottava.15mb",
     0xE050: "clef.G", 0xE052: "clef.G8vb", 0xE053: "clef.G8va",

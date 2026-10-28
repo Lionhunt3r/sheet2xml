@@ -37,6 +37,7 @@ class Event:
     lyrics: list[str] = field(default_factory=list)  # one syllable per verse ("" = none); "-" at the end: word goes on
     hidden: bool = False  # filler rest added to complete a voice
     slurs: list = field(default_factory=list)  # ("start" | "stop" | "start-open" | "stop-open", id, placement)
+    tremolo: tuple[str, int] | None = None  # ("single" | "start" | "stop", strokes)
 
     @property
     def is_rest(self) -> bool:

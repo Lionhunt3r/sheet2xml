@@ -97,6 +97,7 @@ class Chord:
     articulations: list[str] = field(default_factory=list)
     slurs: list = field(default_factory=list)  # ("start" | "stop" | "start-open" | "stop-open", id, placement)
     ottava: int = 0  # octaves the notes sound above (+) or below (-) where they are written
+    tremolo: tuple[str, int] | None = None  # ("single" | "start" | "stop", strokes)
 
     @property
     def top(self) -> float:
@@ -659,7 +660,11 @@ class SystemReader:
                     continue
                 if not (y0 - 0.6 * sp <= g.y <= y1 + 0.6 * sp):
                     continue
-                cands.append((min(abs(sx - g.x), abs(sx - (g.x + hw))), s))
+                # an up stem leaves the head at its right side, a down stem at its left side;
+                # the other side only for heads set beside the stem in a second
+                up = (y0 + y1) / 2 < g.y
+                near, far = (g.x + hw, g.x) if up else (g.x, g.x + hw)
+                cands.append((min(abs(sx - near), abs(sx - far) + 0.5 * sp), s))
             cands.sort(key=lambda t: t[0])
             best = cands[0][1] if cands else None
             if len(cands) > 1:
@@ -698,6 +703,42 @@ class SystemReader:
             else:
                 chords.append(Chord(heads=[h], x=h.glyph.x, stem=None, direction=None, tip=None,
                                     value=HEAD_VALUE[h.glyph.name], grace=h.grace))
+        # tremolo strokes: short slanted bars a stem crosses in the middle (one note),
+        # or bars floating between two long notes (two notes alternating)
+        strokes = set()
+        for bi, b in enumerate(beams):
+            w = b.x1 - b.x0
+            if w > 2.2 * sp:
+                continue
+            for c in chords:
+                if c.stem is None:
+                    continue
+                sx = c.stem.x0
+                if b.x0 + 0.3 * sp < sx < b.x1 - 0.3 * sp and min(c.stem.y0, c.stem.y1) - 0.2 * sp \
+                        <= _beam_y(b, sx) <= max(c.stem.y0, c.stem.y1) + 0.2 * sp \
+                        and abs(_beam_y(b, sx) - c.tip) > 0.8 * sp:
+                    c.tremolo = ("single", c.tremolo[1] + 1 if c.tremolo else 1)
+                    strokes.add(bi)
+                    break
+        for g in glyphs:
+            if g.name.startswith("trem."):
+                near = [c for c in chords if c.stem is not None and abs(c.stem.x0 - (g.x0 + g.x1) / 2) < 1.0 * sp
+                        and min(c.stem.y0, c.stem.y1) - 2 * sp <= g.y <= max(c.stem.y0, c.stem.y1) + 2 * sp]
+                if not near:
+                    near = [c for c in chords if abs(c.x - g.x) < 1.5 * sp]  # whole notes
+                if near:
+                    min(near, key=lambda c: abs(c.x - g.x)).tremolo = ("single", int(g.name.split(".")[1]))
+        longs = sorted((c for c in chords if c.value >= 2 and not c.grace), key=lambda c: c.x)
+        for left, right in zip(longs, longs[1:]):
+            lx = left.stem.x0 if left.stem is not None else max(h.glyph.x1 for h in left.heads)
+            rx = right.stem.x0 if right.stem is not None else right.x
+            between = [bi for bi, b in enumerate(beams) if bi not in strokes
+                       and lx - 0.5 * sp <= b.x0 and b.x1 <= rx + 0.5 * sp and b.x1 - b.x0 > 0.8 * sp
+                       and rx - lx < 8 * sp]
+            if between and left.tremolo is None and right.tremolo is None:
+                left.tremolo = ("start", len(between))
+                right.tremolo = ("stop", len(between))
+                strokes.update(between)
         # flags and beams
         flags = [g for g in glyphs if g.name.startswith("flag.")]
         for c in chords:
@@ -710,7 +751,7 @@ class SystemReader:
                     n_flags += int(f.name.rsplit(".", 1)[1])
             n_beams = 0
             for bi, b in enumerate(beams):
-                if not (b.x0 - 0.3 * sp <= sx <= b.x1 + 0.3 * sp):
+                if bi in strokes or not (b.x0 - 0.3 * sp <= sx <= b.x1 + 0.3 * sp):
                     continue
                 yb = _beam_y(b, sx)
                 # distance from the stem tip towards the notehead
@@ -1426,8 +1467,11 @@ class SystemReader:
                                          tie_start=h.tie_start, tie_stop=h.tie_stop))
                     if h.tie_stop and h.accidental is None:
                         pitches[-1]._keep_from_tie = True  # type: ignore[attr-defined]
+                # two alternating notes of a tremolo share the time of one
+                share = 2 if it.tremolo and it.tremolo[0] != "single" else 1
                 ev = Event(
-                    x=it.x, duration=_dur(it.value, it.dots, it.tuplet), pitches=pitches, voice=it.voice,
+                    x=it.x, duration=_dur(it.value, it.dots, it.tuplet) / share, pitches=pitches, voice=it.voice,
+                    tremolo=it.tremolo,
                     base=it.value, dots=it.dots, tuplet=it.tuplet, grace=it.grace, stem=it.direction,
                     articulations=list(it.articulations), slurs=list(it.slurs),
                     notehead="slash" if any(h.glyph.name.startswith("head.slash") for h in it.heads) else None,

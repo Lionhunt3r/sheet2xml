@@ -365,9 +365,11 @@ class _Writer:
                 nota += self._tuplet_notation(e, tstart, tstop)
                 groups = {"ornaments": ORNAMENTS, "technical": TECHNICAL}
                 for tag, names in groups.items():
-                    marks = [a for a in e.articulations if a in names]
+                    marks = "".join(f"<{a}/>" for a in e.articulations if a in names)
+                    if tag == "ornaments" and e.tremolo:
+                        marks += f'<tremolo type="{e.tremolo[0]}">{min(e.tremolo[1], 4)}</tremolo>'
                     if marks:
-                        nota += f"<{tag}>" + "".join(f"<{a}/>" for a in marks) + f"</{tag}>"
+                        nota += f"<{tag}>{marks}</{tag}>"
                 arts = [a for a in e.articulations if a != "fermata" and a not in ORNAMENTS | TECHNICAL]
                 if arts:
                     nota += "<articulations>" + "".join(f"<{a}/>" for a in arts) + "</articulations>"
