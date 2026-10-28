@@ -1141,6 +1141,8 @@ class SystemReader:
                 if not hits:  # a second set beside the other voice's note
                     near = [(abs(x - e.x), t) for x, t in grid if abs(x - e.x) < 1.6 * sp]
                     hits = [min(near)[1]] if near else []
+                if not hits and times:  # off the grid: right after this voice's previous note
+                    hits = [times[-1] + ves[len(times) - 1].duration]
                 if not hits:
                     break
                 times.append(min(hits))
