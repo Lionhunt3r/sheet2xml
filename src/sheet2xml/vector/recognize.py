@@ -323,6 +323,7 @@ class SystemReader:
         beams = self._beams_in(st)
         stems = [s for s in segs if not any(abs(s.x0 - b) < 0.3 * sp for b in bar_lines_x)]
 
+        repeat_end, repeat_start = self._repeats(st, glyphs, barlines, used_ids)
         chords, rests = self._events(st, glyphs, stems, beams, normal, used_ids)
         self._ties(st, chords)
         self._tuplets(st, sc.texts, glyphs, chords, rests, beams, segs, used_ids)
@@ -354,7 +355,6 @@ class SystemReader:
         self._accidentals(st, [a for a in accs if id(a) not in used_ids], chords)
 
         directions = self._directions(st, glyphs, sc.texts)
-        repeat_end, repeat_start = self._repeats(st, glyphs, barlines)
 
         for mi, (a, b) in enumerate(regions):
             m = Measure(number=0)
@@ -526,7 +526,7 @@ class SystemReader:
             and st.top - 3 * sp <= g.y <= st.bottom + 3 * sp
         ]
         # dots
-        dots = [g for g in glyphs if g.name == "dot"]
+        dots = [g for g in glyphs if g.name == "dot" and id(g) not in used_ids]
         targets = [(c.x, c) for c in chords] + [(r.x, r) for r in rests]
         targets.sort(key=lambda t: t[0])
         heads_all = [(h.glyph, c) for c in chords for h in c.heads]
@@ -622,10 +622,11 @@ class SystemReader:
                 h.tie_stop = True
 
     @staticmethod
-    def _repeats(st: Staff, glyphs, barlines) -> tuple[list[float], list[float]]:
+    def _repeats(st: Staff, glyphs, barlines, used_ids: set[int]) -> tuple[list[float], list[float]]:
         """Barlines with repeat dots: (x of barlines ending a repeat, x of barlines starting one).
 
-        Both are given as the right edge of the barline, like the measure regions."""
+        Both are given as the right edge of the barline, like the measure regions. The dots
+        are added to used_ids so they never count as augmentation dots."""
         sp = st.space
         dots = [
             g for g in glyphs
@@ -634,10 +635,11 @@ class SystemReader:
 
         def has_dots(lo: float, hi: float) -> bool:
             here = [g for g in dots if lo < g.x < hi]
-            if any(g.name == "repeat.dots" for g in here):
-                return True
             ys = {round((g.y - st.top) / sp * 2) for g in here}  # half spaces: 3 and 5
-            return {3, 5} <= ys
+            if any(g.name == "repeat.dots" for g in here) or {3, 5} <= ys:
+                used_ids.update(id(g) for g in here)
+                return True
+            return False
 
         end, start = [], []
         for x0, x1, _kind in barlines:
@@ -748,7 +750,7 @@ class SystemReader:
                     key=lambda e: abs(e.x - x),
                 )
                 group = near[: n]
-            if group and not self._near_group(group, y, sp):
+            if group and not self._near_group(st, group, y):
                 continue
             for e in group:
                 if e.tuplet is None:
@@ -761,9 +763,9 @@ class SystemReader:
                     if lo < r.x < hi and r.tuplet is None and abs(r.x - x) < 6 * sp:
                         r.tuplet = (n, normal_n)
 
-    @staticmethod
-    def _near_group(group, y: float, sp: float) -> bool:
+    def _near_group(self, st: Staff, group, y: float) -> bool:
         """The tuplet number must sit next to its notes, not next to another staff's."""
+        sp = st.space
         ys = []
         for e in group:
             if isinstance(e, Chord):
@@ -772,7 +774,17 @@ class SystemReader:
                     ys.append(e.tip)
             else:
                 ys.append(e.glyph.y)
-        return bool(ys) and min(abs(v - y) for v in ys) <= 3.5 * sp
+        if not ys:
+            return False
+        d = min(abs(v - y) for v in ys)
+        if d <= 3.5 * sp:
+            return True
+        # a little further out beyond the stem tips, as long as no other staff is close
+        tips = [c.tip for c in group if isinstance(c, Chord) and c.tip is not None]
+        beyond = tips and (all(y > t for t in tips) if all(c.direction == "down" for c in group
+                                                          if isinstance(c, Chord)) else all(y < t for t in tips))
+        crowded = any(o is not st and o.distance(y) < 4 * sp for o in self.system.staves + self.other_staves)
+        return d <= 4.5 * sp and bool(beyond) and not crowded
 
     def _multirests(self, st, glyphs, used_ids) -> list[tuple[float, int]]:
         sp = st.space

@@ -110,7 +110,10 @@ def find_staves(pc: PageContent) -> list[Staff]:
             chain = [i, j]
             ok = True
             for k in range(2, 5):
-                target = top[0] + k * d
+                # step from the last line found with the mean spacing so far: rounded
+                # coordinates make the first gap a little off (3.24 vs 3.36)
+                step = (lines[chain[-1]][0] - top[0]) / (k - 1)
+                target = lines[chain[-1]][0] + step
                 best = None
                 for m in range(j + 1, len(lines)):
                     if lines[m][0] > target + 0.2 * d:
