@@ -172,6 +172,7 @@ def _key_alter(key: int, step: str) -> int:
 class SystemReader:
     def __init__(self, pc: PageContent, system: System, carry: dict[int, dict], page_staves: list[Staff] | None = None):
         self.pc = pc
+        self.gap_rests: set[int] = set()
         self.system = system
         # staves of the other systems on the page, so that symbols near them are left alone
         own = {id(s) for s in system.staves}
@@ -209,7 +210,45 @@ class SystemReader:
                 continue
             best = min(everything, key=lambda c: (c.staff.distance(t.origin_y), abs(t.origin_y - c.staff.middle)))
             best.texts.append(t)
+        self._gap_rests(contents)
         return contents
+
+    def _gap_rests(self, contents: list[StaffContent]) -> None:
+        """A rest between two staves goes with the staff whose notes reach into that gap
+        (piano: the left hand's upper voice written high up)."""
+        moves = []
+        for c in contents:
+            st = c.staff
+            sp = st.space
+            for g in c.glyphs:
+                if not g.name.startswith("rest.") or st.distance(g.y) < 1.2 * sp:
+                    continue
+                side = [o for o in contents if o is not c and (o.staff.top > g.y > st.bottom or o.staff.bottom < g.y < st.top)]
+                if not side:
+                    continue
+                other = min(side, key=lambda o: o.staff.distance(g.y))
+                if not self._braced(st, other.staff):
+                    continue  # only within one instrument (piano, harp, organ)
+                self.gap_rests.add(id(g))  # may sit further out than usual
+                lo, hi = (st.bottom, other.staff.top) if other.staff.top > st.bottom else (other.staff.bottom, st.top)
+
+                def nearest(cont):
+                    xs = [abs(h.x - g.x) for h in cont.glyphs if h.name.startswith("head.") and lo < h.y < hi
+                          and cont.staff.distance(h.y) > 0.6 * sp and abs(h.x - g.x) < 8 * sp]
+                    return min(xs, default=None)
+                theirs, mine = nearest(other), nearest(c)
+                if theirs is not None and (mine is None or theirs < mine):
+                    moves.append((g, c, other))
+        for g, src, dst in moves:
+            src.glyphs.remove(g)
+            dst.glyphs.append(g)
+
+    def _braced(self, a: Staff, b: Staff) -> bool:
+        staves = self.system.staves
+        if a not in staves or b not in staves:
+            return False
+        i, j = sorted((staves.index(a), staves.index(b)))
+        return any(lo <= i and j <= hi for lo, hi in self.system.braces)
 
     def _ledger_owner(self, g: Glyph, contents: list[StaffContent], ledgers: list[Segment]):
         """A note between two staves belongs to the staff its ledger lines lead to."""
@@ -651,7 +690,7 @@ class SystemReader:
             RestSym(glyph=g, value=REST_VALUE[g.name])
             for g in glyphs
             if g.name in REST_VALUE and id(g) not in used_ids
-            and st.top - 3 * sp <= g.y <= st.bottom + 3 * sp
+            and (st.top - 3 * sp <= g.y <= st.bottom + 3 * sp or id(g) in self.gap_rests)
         ]
         # dots
         dots = [g for g in glyphs if g.name == "dot" and id(g) not in used_ids]
@@ -886,6 +925,11 @@ class SystemReader:
                 )
                 group = near[: n]
             if group and not self._near_group(st, group, y):
+                if self._near_group(st, group, y, crowded_ok=True):
+                    # between two staves: decided later by whether the measure adds up
+                    for e in group:
+                        if e.tuplet is None:
+                            e.maybe_tuplet = (n, normal_n)
                 continue
             for e in group:
                 if e.tuplet is None:
@@ -898,7 +942,7 @@ class SystemReader:
                     if lo < r.x < hi and r.tuplet is None and abs(r.x - x) < 6 * sp:
                         r.tuplet = (n, normal_n)
 
-    def _near_group(self, st: Staff, group, y: float) -> bool:
+    def _near_group(self, st: Staff, group, y: float, crowded_ok: bool = False) -> bool:
         """The tuplet number must sit next to its notes, not next to another staff's."""
         sp = st.space
         ys = []
@@ -919,7 +963,7 @@ class SystemReader:
         beyond = tips and (all(y > t for t in tips) if all(c.direction == "down" for c in group
                                                           if isinstance(c, Chord)) else all(y < t for t in tips))
         crowded = any(o is not st and o.distance(y) < 4 * sp for o in self.system.staves + self.other_staves)
-        return d <= 4.5 * sp and bool(beyond) and not crowded
+        return d <= 4.5 * sp and bool(beyond) and (crowded_ok or not crowded)
 
     def _multirests(self, st, glyphs, used_ids) -> list[tuple[float, int]]:
         sp = st.space
@@ -1055,6 +1099,16 @@ class SystemReader:
             else:
                 for it, v in saved:
                     it.voice = v
+        maybe = [c for c in chords + rests if getattr(c, "maybe_tuplet", None) and c.tuplet is None]
+        if maybe and self._voice_errors(events, expected):
+            for c in maybe:
+                c.tuplet = c.maybe_tuplet
+            alt = self._make_events(chords, rests, clef, key, clef_changes, expected)
+            if not self._voice_errors(alt, expected):
+                events = alt
+            else:
+                for c in maybe:
+                    c.tuplet = None
         if self._voice_errors(events, expected):
             self._fill_hidden_rests(events, expected, sp)
         for v, total in self._voice_errors(events, expected):
@@ -1084,6 +1138,9 @@ class SystemReader:
             times = []
             for e in ves:
                 hits = [t for x, t in grid if abs(x - e.x) < 1.0 * sp]
+                if not hits:  # a second set beside the other voice's note
+                    near = [(abs(x - e.x), t) for x, t in grid if abs(x - e.x) < 1.6 * sp]
+                    hits = [min(near)[1]] if near else []
                 if not hits:
                     break
                 times.append(min(hits))
