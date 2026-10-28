@@ -54,3 +54,28 @@ def test_interline_and_rescale():
     assert abs(interline(img) - 12) <= 2
     out = prepare(img, photo=False)
     assert abs(interline(out) - 22) <= 3
+
+
+def test_tuplet_with_dotted_pair_is_one_group():
+    # dotted eighth, sixteenth, eighth under one "3"
+    m = Measure(number=1, time=(1, 4), expected=Fraction(1))
+    t = (3, 2)
+    m.events = [
+        Event(x=0, duration=Fraction(1, 2), pitches=[Pitch("C", 5)], base=Fraction(1, 2), dots=1, tuplet=t),
+        Event(x=1, duration=Fraction(1, 6), pitches=[Pitch("D", 5)], base=Fraction(1, 4), tuplet=t),
+        Event(x=2, duration=Fraction(1, 3), pitches=[Pitch("E", 5)], base=Fraction(1, 2), tuplet=t),
+    ]
+    xml = to_musicxml(Score(title="T", parts=[Part(name="Fl", measures=[m])]))
+    assert xml.count('<tuplet type="start"') == 1
+    assert xml.count('<tuplet type="stop"') == 1
+
+
+def test_hidden_rests_complete_a_second_voice():
+    from sheet2xml.vector.recognize import SystemReader
+
+    ev = [Event(x=float(i * 10), duration=Fraction(1), pitches=[Pitch("C", 5)], voice=1) for i in range(3)]
+    ev.append(Event(x=10.0, duration=Fraction(1), pitches=[Pitch("A", 4)], voice=2))
+    SystemReader._fill_hidden_rests(None, ev, Fraction(3), 2.0)
+    v2 = sorted((e for e in ev if e.voice == 2), key=lambda e: e.x)
+    assert [e.hidden for e in v2] == [True, False, True]
+    assert sum(e.duration for e in v2) == 3

@@ -22,8 +22,8 @@ warnings.filterwarnings("ignore")
 def tokens(part, with_rests: bool = True, with_dur: bool = True):
     out = []
     for el in part.flatten().notesAndRests:
-        if el.duration.isGrace:
-            continue
+        if el.duration.isGrace or el.isRest and el.style.hideObjectOnPrint:
+            continue  # grace notes and invisible filler rests
         if el.isRest:
             if not with_rests:
                 continue

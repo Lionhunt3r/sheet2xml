@@ -15,7 +15,7 @@ def measures(part):
     for ms in part.getElementsByClass("Measure"):
         toks = []
         for n in ms.flatten().notesAndRests:
-            if n.duration.isGrace:
+            if n.duration.isGrace or n.isRest and n.style.hideObjectOnPrint:
                 continue
             name = "R" if n.isRest else ".".join(sorted(p.nameWithOctave for p in n.pitches))
             toks.append(f"{name}:{float(n.quarterLength):g}")

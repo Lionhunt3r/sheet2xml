@@ -57,6 +57,20 @@ SONATA: dict[str, str] = {
     "u": "art.fermata",
     "{": "brace",
     "Ÿ": "orn.trill",
+    "m": "orn.mordent",
+    "≤": "art.upbow",
+    "≥": "art.downbow",
+    # Finale Maestro: slash noteheads, percussion clefs, dynamics in the music font
+    "Û": "head.slash",
+    "|": "head.slash.half",
+    "÷": "clef.perc",
+    "ã": "clef.perc",
+    "p": "dyn.p",
+    "P": "dyn.mp",
+    "f": "dyn.f",
+    "F": "dyn.mf",
+    "π": "dyn.pp",
+    "ƒ": "dyn.ff",
 }
 for _d in "0123456789":
     SONATA[_d] = f"time.{_d}"
@@ -77,6 +91,7 @@ SMUFL: dict[int, str] = {
     0xE0A0: "head.breve", 0xE0A2: "head.whole", 0xE0A3: "head.half", 0xE0A4: "head.black",
     0xE0A9: "head.black", 0xE0A8: "head.whole", 0xE0FA: "head.black", 0xE0D9: "head.half",
     0xE0DB: "head.black",
+    0xE100: "head.slash", 0xE101: "head.slash", 0xE103: "head.slash.half", 0xE102: "head.slash.whole",
     # Dorico/Bravura "large" or engraving alternates
     0xF4BE: "head.black", 0xF4BD: "head.half", 0xF4BC: "head.whole",
     0xE260: "acc.flat", 0xE261: "acc.natural", 0xE262: "acc.sharp",
@@ -90,10 +105,15 @@ SMUFL: dict[int, str] = {
     0xE08A: "time.common", 0xE08B: "time.cut",
     0xE4A0: "art.accent", 0xE4A1: "art.accent", 0xE4A2: "art.staccato", 0xE4A3: "art.staccato",
     0xE4A4: "art.tenuto", 0xE4A5: "art.tenuto", 0xE4C0: "art.fermata", 0xE4C1: "art.fermata",
+    0xE4A6: "art.staccatissimo", 0xE4A7: "art.staccatissimo", 0xE4A8: "art.staccatissimo",
+    0xE4A9: "art.staccatissimo", 0xE4AC: "art.marcato", 0xE4AD: "art.marcato",
+    0xE610: "art.downbow", 0xE611: "art.downbow", 0xE612: "art.upbow", 0xE613: "art.upbow",
+    0xE566: "orn.trill", 0xE567: "orn.turn", 0xE56C: "orn.mordent", 0xE56D: "orn.mordent",
+    0xE534: "dyn.fp", 0xE535: "dyn.fz", 0xE537: "dyn.sfp", 0xE538: "dyn.sfpp",
     0xE000: "brace", 0xE566: "orn.trill",
     0xE520: "dyn.p", 0xE521: "dyn.m", 0xE522: "dyn.f", 0xE523: "dyn.r", 0xE524: "dyn.s",
     0xE525: "dyn.z", 0xE526: "dyn.n",
-    0xE52B: "dyn.ppp", 0xE52A: "dyn.ppp", 0xE52C: "dyn.mp", 0xE52D: "dyn.mf",
+    0xE52B: "dyn.pp", 0xE52A: "dyn.ppp", 0xE52C: "dyn.mp", 0xE52D: "dyn.mf",
     0xE52F: "dyn.ff", 0xE530: "dyn.fff", 0xE536: "dyn.sf", 0xE539: "dyn.sfz",
 }
 for _i in range(10):

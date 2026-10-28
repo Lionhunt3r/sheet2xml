@@ -21,7 +21,9 @@ TYPE_NAMES = {
     Fraction(1, 16): "64th",
     Fraction(1, 32): "128th",
 }
-DYNAMICS = {"p", "pp", "ppp", "mp", "mf", "f", "ff", "fff", "sf", "sfz", "fp", "sfp", "rf", "rfz", "fz"}
+DYNAMICS = {"p", "pp", "ppp", "mp", "mf", "f", "ff", "fff", "sf", "sfz", "fp", "sfp", "sfpp", "rf", "rfz", "fz"}
+ORNAMENTS = {"trill-mark", "mordent", "turn"}
+TECHNICAL = {"up-bow", "down-bow"}
 
 
 def _divisions(score: Score) -> int:
@@ -187,7 +189,10 @@ class _Writer:
                     if not tuplet_acc:
                         tstart = True
                     tuplet_acc.append(_notated(e))
-                    if _is_power_of_two(sum(tuplet_acc) / e.tuplet[0]):
+                    # the group closes once it spans n equal units (and not before every
+                    # note of the smallest value could have filled it: sextuplets, dotted pairs)
+                    total = sum(tuplet_acc)
+                    if _is_power_of_two(total / e.tuplet[0]) and total >= e.tuplet[0] * min(tuplet_acc):
                         tstop = True
                         tuplet_acc = []
                 elif tuplet_acc:
@@ -261,6 +266,8 @@ class _Writer:
             xml.append(tm)
             if e.stem:
                 xml.append(f"<stem>{e.stem}</stem>")
+            if e.notehead:
+                xml.append(f"<notehead>{e.notehead}</notehead>")
             xml.append(staff)
             nota = ""
             if pt.tie_stop:
@@ -269,7 +276,12 @@ class _Writer:
                 nota += '<tied type="start"/>'
             if i == 0:
                 nota += self._tuplet_notation(e, tstart, tstop)
-                arts = [a for a in e.articulations if a != "fermata"]
+                groups = {"ornaments": ORNAMENTS, "technical": TECHNICAL}
+                for tag, names in groups.items():
+                    marks = [a for a in e.articulations if a in names]
+                    if marks:
+                        nota += f"<{tag}>" + "".join(f"<{a}/>" for a in marks) + f"</{tag}>"
+                arts = [a for a in e.articulations if a != "fermata" and a not in ORNAMENTS | TECHNICAL]
                 if arts:
                     nota += "<articulations>" + "".join(f"<{a}/>" for a in arts) + "</articulations>"
                 if "fermata" in e.articulations:

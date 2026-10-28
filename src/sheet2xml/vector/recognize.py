@@ -18,6 +18,9 @@ HEAD_VALUE = {
     "head.whole": Fraction(4),
     "head.half": Fraction(2),
     "head.black": Fraction(1),
+    "head.slash": Fraction(1),
+    "head.slash.half": Fraction(2),
+    "head.slash.whole": Fraction(4),
 }
 REST_VALUE = {
     "rest.breve": Fraction(8),
@@ -50,6 +53,13 @@ ARTICULATION = {
     "art.tenuto": "tenuto",
     "art.staccato": "staccato",
     "art.fermata": "fermata",
+    "art.staccatissimo": "staccatissimo",
+    "art.marcato": "strong-accent",
+    "art.upbow": "up-bow",
+    "art.downbow": "down-bow",
+    "orn.trill": "trill-mark",
+    "orn.mordent": "mordent",
+    "orn.turn": "turn",
 }
 
 
@@ -324,7 +334,7 @@ class SystemReader:
         time_changes = []
         rest_digits = [g for g in time_digits if id(g) not in used_ids]
         for grp in _cluster_x(rest_digits, 1.5 * sp):
-            if any(abs(c.x - grp[0].x) < 3 * sp for c in chords):
+            if any(abs(c.x - grp[0].x) < 1.5 * sp for c in chords):
                 continue
             t, sym = _parse_time(grp, st)
             if t:
@@ -356,8 +366,10 @@ class SystemReader:
                 if abs(x - a) < 0.5 * sp:
                     key = k
                     m.key = k
+            # a time change sits at the start of the measure, after any key change
+            first = min((e.x for e in chords + rests if in_region(e.x)), default=b)
             for x, t, sym in time_changes:
-                if in_region(x) and x < a + 6 * sp:
+                if in_region(x) and x < min(first, a + 14 * sp):
                     time, time_symbol = t, sym
                     m.time = t
                     m.time_symbol = sym
@@ -438,6 +450,8 @@ class SystemReader:
             if not g.name.startswith("head."):
                 continue
             pos = round((st.bottom - g.y) / (sp / 2))
+            if g.name.startswith("head.slash"):
+                pos = 4  # rhythm slashes sit on the middle line; glyph origins vary by font
             heads.append(Head(glyph=g, pos=pos, grace=g.size < 0.8 * normal))
         # attach stems
         by_stem: dict[int, list[Head]] = {}
@@ -456,7 +470,7 @@ class SystemReader:
                 d = min(abs(sx - g.x), abs(sx - (g.x + hw)))
                 if bestd is None or d < bestd:
                     best, bestd = s, d
-            if best is not None and g.name != "head.whole" and g.name != "head.breve":
+            if best is not None and g.name not in ("head.whole", "head.breve", "head.slash.whole"):
                 h.stem = best
                 by_stem.setdefault(id(best), []).append(h)
             else:
@@ -529,7 +543,7 @@ class SystemReader:
             return best[1] if best else None
 
         for g in glyphs:
-            if g.name.startswith("art."):
+            if g.name.startswith(("art.", "orn.")):
                 c = over_head(g, 6.0)
                 kind = ARTICULATION.get(g.name)
                 if c is not None and kind and kind not in c.articulations:
@@ -550,7 +564,8 @@ class SystemReader:
                     right = max(h.glyph.x1 for h in t.heads)
                     if d.x < right - 0.5 * sp:
                         continue
-                    if any(abs(h.glyph.y - d.y) < 0.8 * sp for h in t.heads):
+                    if any(abs(h.glyph.y - d.y) < (1.6 if h.glyph.name.startswith("head.slash") else 0.8) * sp
+                           for h in t.heads):
                         owner = t
                 else:
                     if t.glyph.x1 - 0.3 * sp <= d.x and abs(t.glyph.y - d.y) < 2.5 * sp:
@@ -668,8 +683,19 @@ class SystemReader:
                 continue
             group: list = []
             for bi, b in enumerate(beams):
-                if b.x0 - 1.0 * sp <= x <= b.x1 + 1.0 * sp and abs(_beam_y(b, x) - y) < 3.5 * sp:
-                    group = [c for c in chords if bi in c.beams]
+                if not b.x0 - 1.0 * sp <= x <= b.x1 + 1.0 * sp:
+                    continue
+                members = [c for c in chords if bi in c.beams]
+                # the number sits at the beam, or (Finale) on the notehead side of the group
+                head_side = members and min(abs(h.glyph.y - y) for c in members for h in c.heads) < 2.5 * sp \
+                    and (y < min(c.top for c in members)) == (_beam_y(b, x) > max(c.bottom for c in members))
+                if head_side and abs(_beam_y(b, x) - y) >= 3.5 * sp:
+                    # only when the group splits evenly into n notes of a value it contains
+                    vals = [_dur(c.value, c.dots, None) for c in members]
+                    if sum(vals) / n not in vals:
+                        continue
+                if abs(_beam_y(b, x) - y) < 3.5 * sp or head_side:
+                    group = members
                     if group:
                         # include chords sharing any beam with the group
                         ids = {i for c in group for i in c.beams}
@@ -800,21 +826,117 @@ class SystemReader:
         dyn = sorted([g for g in glyphs if g.name.startswith("dyn.")], key=lambda g: g.x)
         for grp in _cluster_x(dyn, 0.4 * sp, by_gap=True):
             word = "".join(g.name[4:] for g in grp)
-            if word in ("p", "pp", "ppp", "mp", "mf", "f", "ff", "fff", "sf", "sfz", "fp", "sfp", "rf", "rfz", "fz"):
+            if word in ("p", "pp", "ppp", "mp", "mf", "f", "ff", "fff", "sf", "sfz", "fp", "sfp", "sfpp", "rf", "rfz", "fz"):
                 out.append(Direction(x=grp[0].x, staff=1, kind="dynamic", text=word, above=grp[0].y < st.top))
         return out
 
     # ------------------------------------------------------------------ events
     def _build_events(self, st, chords, rests, clef, key, clef_changes, expected, measure) -> list[Event]:
         sp = st.space
-        multi = self._is_multivoice(chords, sp)
-        if multi:
-            for c in chords:
+        if self._is_multivoice(chords, sp):
+            self._split_voices(st, chords, rests)
+        events = self._make_events(chords, rests, clef, key, clef_changes, expected)
+        if self._voice_errors(events, expected) and rests and self._second_voice_rests(st, chords, rests, expected):
+            # a rest under or over a note, or rests on top of a measure the notes already fill,
+            # belong to a second voice even when no opposite stems show it
+            saved = [(it, it.voice) for it in chords + rests]
+            self._split_voices(st, chords, rests)
+            alt = self._make_events(chords, rests, clef, key, clef_changes, expected)
+            if not self._voice_errors(alt, expected):
+                events = alt
+            else:
+                for it, v in saved:
+                    it.voice = v
+        if self._voice_errors(events, expected):
+            self._fill_hidden_rests(events, expected, sp)
+        for v, total in self._voice_errors(events, expected):
+            measure.warnings.append(f"voice {v}: {total} != {expected}")
+        return events
+
+    def _fill_hidden_rests(self, events, expected, sp) -> None:
+        """Notation programs hide rests in secondary voices; put them back as invisible rests,
+        timed by the notes of a complete voice at the same horizontal position."""
+        voices = {}
+        for e in events:
+            if not e.grace:
+                voices.setdefault(e.voice, []).append(e)
+        complete = [v for v, ves in voices.items() if sum(e.duration for e in ves) == expected]
+        if not complete:
+            return
+        grid: list[tuple[float, Fraction]] = []
+        for v in complete:
+            t = Fraction(0)
+            for e in sorted(voices[v], key=lambda e: e.x):
+                grid.append((e.x, t))
+                t += e.duration
+        for v, ves in voices.items():
+            if v in complete or sum(e.duration for e in ves) > expected:
+                continue
+            ves.sort(key=lambda e: e.x)
+            times = []
+            for e in ves:
+                hits = [t for x, t in grid if abs(x - e.x) < 1.0 * sp]
+                if not hits:
+                    break
+                times.append(min(hits))
+            if len(times) != len(ves):
+                continue
+            cur = Fraction(0)
+            fill = []
+            for e, t in zip(ves, times):
+                if t < cur:
+                    break
+                if t > cur:
+                    fill.append(_hidden_rest(e.x - 0.01, t - cur, v))
+                cur = t + e.duration
+            else:
+                if cur > expected:
+                    continue
+                if cur < expected:
+                    fill.append(_hidden_rest(ves[-1].x + 0.01, expected - cur, v))
+                events.extend(fill)
+
+    def _split_voices(self, st, chords, rests) -> None:
+        sp = st.space
+        both = {c.direction for c in chords if not c.grace} >= {"up", "down"}
+        for c in chords:
+            if not both:
+                c.voice = 1
+            elif c.direction is not None:
                 c.voice = 1 if c.direction == "up" else 2
-                if c.direction is None:
-                    c.voice = 1 if c.top < st.middle else 2
-            for r in rests:
-                r.voice = 1 if r.glyph.y < st.middle - 0.3 * sp else 2 if r.glyph.y > st.middle + 0.3 * sp else 1
+            else:
+                c.voice = 1 if c.top < st.middle else 2
+        for r in rests:
+            ry = r.glyph.y
+            near = [c for c in chords if abs(c.x - r.x) < 1.2 * sp and not c.grace]
+            if near:
+                # a rest sharing a beat with a note goes to the other voice
+                r.voice = 2 if ry > max(c.bottom for c in near) else 1
+                if r.voice == min(c.voice for c in near) and len({c.voice for c in chords}) > 1:
+                    r.voice = 3 - r.voice
+            elif not {c.voice for c in chords} >= {2} and chords:
+                r.voice = 2
+            else:
+                r.voice = 1 if ry < st.middle - 0.3 * sp else 2 if ry > st.middle + 0.3 * sp else 1
+
+    @staticmethod
+    def _second_voice_rests(st, chords, rests, expected) -> bool:
+        sp = st.space
+        if any(abs(c.x - r.x) < 1.2 * sp for c in chords if not c.grace for r in rests):
+            return True
+        notes = sum(_dur(c.value, c.dots, c.tuplet) for c in chords if not c.grace)
+        return notes == expected
+
+    @staticmethod
+    def _voice_errors(events, expected):
+        out = []
+        for v in sorted({e.voice for e in events}):
+            total = sum(e.duration for e in events if e.voice == v)
+            if total != expected:
+                out.append((v, total))
+        return out
+
+    def _make_events(self, chords, rests, clef, key, clef_changes, expected) -> list[Event]:
         events: list[Event] = []
         altered: dict[int, int] = {}  # diatonic -> alter within the measure
         items = sorted(chords + rests, key=lambda e: e.x)
@@ -845,6 +967,7 @@ class SystemReader:
                     x=it.x, duration=_dur(it.value, it.dots, it.tuplet), pitches=pitches, voice=it.voice,
                     base=it.value, dots=it.dots, tuplet=it.tuplet, grace=it.grace, stem=it.direction,
                     articulations=list(it.articulations),
+                    notehead="slash" if any(h.glyph.name.startswith("head.slash") for h in it.heads) else None,
                 )
                 if it.grace:
                     ev.duration = Fraction(0)
@@ -861,10 +984,6 @@ class SystemReader:
             if len(ves) == 1 and ves[0].is_rest and ves[0].base in (Fraction(4), Fraction(8)):
                 ves[0].duration = expected
                 ves[0].full_measure = True
-        for v in sorted({e.voice for e in events}):
-            total = sum(e.duration for e in events if e.voice == v)
-            if total != expected and events:
-                measure.warnings.append(f"voice {v}: {total} != {expected}")
         return events
 
     def _is_multivoice(self, chords: list[Chord], sp: float) -> bool:
@@ -883,6 +1002,14 @@ class SystemReader:
 def _median(vals):
     vals = sorted(vals)
     return vals[len(vals) // 2] if vals else None
+
+
+def _hidden_rest(x: float, duration: Fraction, voice: int) -> Event:
+    base, dots = duration, 0
+    undotted = duration * 2 / 3
+    if undotted in HEAD_VALUE.values() or undotted in REST_VALUE.values():
+        base, dots = undotted, 1  # dotted value
+    return Event(x=x, duration=duration, voice=voice, base=base, dots=dots, hidden=True)
 
 
 def _dur(value: Fraction, dots: int, tuplet) -> Fraction:
