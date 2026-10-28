@@ -9,6 +9,7 @@ from pathlib import Path
 import pymupdf
 
 from .audiveris import OMRError, available, run_audiveris
+from .cleanup import clean_omr
 from .merge import merge_musicxml
 from .preprocess import prepare_file
 
@@ -63,7 +64,7 @@ def recognize_files(paths: list[str], preprocess: bool = True, review: bool = Fa
         keep = os.path.join(tmp, "omr")
         os.makedirs(keep)
         texts = run_audiveris([book], keep_dir=keep)
-        xml = merge_musicxml(texts)
+        xml = clean_omr(merge_musicxml(texts))
         projects = sorted(Path(keep).glob("*.omr"))
         if review and len(texts) == 1 and len(projects) == 1:
             from .review import review_omr

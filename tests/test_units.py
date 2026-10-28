@@ -149,3 +149,19 @@ def test_printed_accidentals_and_arpeggio():
     assert xml.count("<accidental>") == 2
     assert "<accidental>flat</accidental>" in xml and "<accidental>natural</accidental>" in xml
     assert xml.count("<arpeggiate/>") == 2
+
+
+def test_omr_lyrics_cleanup():
+    from sheet2xml.omr.cleanup import clean_omr
+
+    def note(text):
+        return (f"<note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration>"
+                f"<lyric number=\"1\"><text>{text}</text></lyric></note>")
+    xml = ("<score-partwise><part id=\"P1\">"
+           f"<measure number=\"1\">{note('mf')}{note('===')}</measure>"
+           f"<measure number=\"2\">{note('J')}</measure>"
+           f"<measure number=\"3\">{note('©')}{note('Lorenz')}</measure>"
+           "</part></score-partwise>")
+    out = clean_omr(xml)
+    assert "<lyric" not in out
+    assert out.count("<mf />") + out.count("<mf/>") == 1
