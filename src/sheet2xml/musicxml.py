@@ -1,0 +1,481 @@
+"""Write the score model as MusicXML 4.0 (partwise), the format Sibelius,
+MuseScore, Dorico and Finale import."""
+
+from __future__ import annotations
+
+import math
+from fractions import Fraction
+from xml.sax.saxutils import escape
+
+from . import __version__
+from .model import Event, Measure, Part, Score
+
+TYPE_NAMES = {
+    Fraction(8): "breve",
+    Fraction(4): "whole",
+    Fraction(2): "half",
+    Fraction(1): "quarter",
+    Fraction(1, 2): "eighth",
+    Fraction(1, 4): "16th",
+    Fraction(1, 8): "32nd",
+    Fraction(1, 16): "64th",
+    Fraction(1, 32): "128th",
+}
+DYNAMICS = {"p", "pp", "ppp", "mp", "mf", "f", "ff", "fff", "sf", "sfz", "fp", "sfp", "sfpp", "rf", "rfz", "fz"}
+ORNAMENTS = {"trill-mark", "mordent", "turn"}
+TECHNICAL = {"up-bow", "down-bow"}
+
+
+def _divisions(score: Score) -> int:
+    den = 1
+    for p in score.parts:
+        for m in p.measures:
+            for e in m.events:
+                for v in (e.duration, m.expected or Fraction(0)):
+                    den = den * v.denominator // math.gcd(den, v.denominator)
+    while den < 4:
+        den *= 2
+    return den
+
+
+HARMONY_KINDS = [  # suffix (after the root and its accidental) -> MusicXML kind, longest first
+    ("maj9", "major-ninth"), ("maj7", "major-seventh"), ("M7", "major-seventh"), ("Δ7", "major-seventh"),
+    ("Δ", "major-seventh"), ("maj", "major"), ("M", "major"), ("m7b5", "half-diminished"), ("min7b5", "half-diminished"), ("ø", "half-diminished"),
+    ("dim7", "diminished-seventh"), ("°7", "diminished-seventh"), ("dim", "diminished"), ("°", "diminished"),
+    ("min9", "minor-ninth"), ("m9", "minor-ninth"), ("min7", "minor-seventh"), ("m7", "minor-seventh"),
+    ("-7", "minor-seventh"), ("min6", "minor-sixth"), ("m6", "minor-sixth"), ("mmaj7", "major-minor"),
+    ("min", "minor"), ("m", "minor"), ("-", "minor"), ("aug", "augmented"), ("+", "augmented"),
+    ("sus4", "suspended-fourth"), ("sus2", "suspended-second"), ("sus", "suspended-fourth"),
+    ("13", "dominant-13th"), ("11", "dominant-11th"), ("9", "dominant-ninth"), ("7", "dominant"),
+    ("6", "major-sixth"), ("5", "power"), ("", "major"),
+]
+STEP_ALTER = {"#": 1, "♯": 1, "b": -1, "♭": -1, "es": -1, "s": -1, "is": 1}
+
+
+def _root(text: str) -> tuple[str, int, str] | None:
+    """Split "Bb7" into ("B", -1, "7"); German H is B."""
+    if not text or text[0].upper() not in "ABCDEFGH":
+        return None
+    step = text[0].upper()
+    rest = text[1:]
+    alter = 0
+    for acc in ("#", "♯", "b", "♭"):
+        if rest.startswith(acc):
+            alter, rest = STEP_ALTER[acc], rest[1:]
+            break
+    return ("B" if step == "H" else step), alter, rest
+
+
+def harmony_xml(text: str) -> str | None:
+    t = text.strip().replace(" ", "")
+    if t.lower().rstrip(".") in ("n.c", "nc", "n.c.", "n"):
+        return "<harmony><root><root-step text=\"\">C</root-step></root><kind text=\"N.C.\">none</kind></harmony>"
+    bass = None
+    if "/" in t:
+        t, b = t.split("/", 1)
+        bass = _root(b)
+    r = _root(t)
+    if r is None:
+        return None
+    step, alter, suffix = r
+    sfx, kind = next((s, k) for s, k in HARMONY_KINDS if suffix.startswith(s))
+    if kind == "major" and suffix != sfx:
+        kind = "other"  # add9, alt, ...: MusicXML keeps the printed text
+    xml = [f"<harmony><root><root-step>{step}</root-step>"]
+    if alter:
+        xml.append(f"<root-alter>{alter}</root-alter>")
+    xml.append(f'</root><kind text="{escape(suffix, {chr(34): "&quot;"})}">{kind}</kind>')
+    if bass:
+        xml.append(f"<bass><bass-step>{bass[0]}</bass-step>")
+        if bass[1]:
+            xml.append(f"<bass-alter>{bass[1]}</bass-alter>")
+        xml.append("</bass>")
+    xml.append("</harmony>")
+    return "".join(xml)
+
+
+def _is_power_of_two(fr: Fraction) -> bool:
+    if fr <= 0:
+        return False
+    n, d = fr.numerator, fr.denominator
+    return (n & (n - 1) == 0) and (d & (d - 1) == 0)
+
+
+class _Writer:
+    def __init__(self, score: Score):
+        self.score = score
+        self.div = _divisions(score)
+        self.out: list[str] = []
+
+    def w(self, s: str) -> None:
+        self.out.append(s)
+
+    def dur(self, q: Fraction) -> int:
+        return int(q * self.div)
+
+    def run(self) -> str:
+        sc = self.score
+        self.w('<?xml version="1.0" encoding="UTF-8" standalone="no"?>')
+        self.w('<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" '
+               '"http://www.musicxml.org/dtds/partwise.dtd">')
+        self.w('<score-partwise version="4.0">')
+        if sc.title:
+            self.w(f"  <work><work-title>{escape(sc.title)}</work-title></work>")
+        self.w("  <identification>")
+        for kind, val in (("composer", sc.composer), ("lyricist", sc.lyricist), ("arranger", sc.arranger)):
+            if val:
+                self.w(f'    <creator type="{kind}">{escape(val)}</creator>')
+        self.w("    <encoding>")
+        self.w(f"      <software>sheet2xml {__version__}</software>")
+        self.w('      <supports element="accidental" type="yes"/>')
+        self.w('      <supports element="beam" type="no"/>')
+        self.w('      <supports element="stem" type="yes"/>')
+        self.w("    </encoding>")
+        self.w("  </identification>")
+        if sc.title or sc.subtitle:
+            self.w("  <credit page=\"1\"><credit-type>title</credit-type>"
+                   f"<credit-words justify=\"center\" valign=\"top\" font-size=\"22\">{escape(sc.title)}</credit-words></credit>")
+        if sc.subtitle:
+            self.w("  <credit page=\"1\"><credit-type>subtitle</credit-type>"
+                   f"<credit-words justify=\"center\" valign=\"top\">{escape(sc.subtitle)}</credit-words></credit>")
+        right = "\n".join(x for x in (sc.composer, sc.arranger) if x)
+        if right:
+            self.w("  <credit page=\"1\"><credit-type>composer</credit-type>"
+                   f"<credit-words justify=\"right\" valign=\"top\">{escape(right)}</credit-words></credit>")
+        if sc.lyricist:
+            self.w("  <credit page=\"1\"><credit-type>lyricist</credit-type>"
+                   f"<credit-words justify=\"left\" valign=\"top\">{escape(sc.lyricist)}</credit-words></credit>")
+        self.w("  <part-list>")
+        for i, p in enumerate(sc.parts, start=1):
+            self.w(f'    <score-part id="P{i}">')
+            self.w(f"      <part-name>{escape(p.name)}</part-name>")
+            if p.abbreviation:
+                self.w(f"      <part-abbreviation>{escape(p.abbreviation)}</part-abbreviation>")
+            self.w("    </score-part>")
+        self.w("  </part-list>")
+        for i, p in enumerate(sc.parts, start=1):
+            self.part(i, p)
+        self.w("</score-partwise>")
+        return "\n".join(self.out) + "\n"
+
+    # ------------------------------------------------------------------ parts
+    def part(self, idx: int, p: Part) -> None:
+        self.w(f'  <part id="P{idx}">')
+        self.clef_now: dict[int, object] = {}
+        self.in_word: dict[int, bool] = {}  # verse -> the last syllable continues the word
+        self.slur_number: dict[int, int] = {}  # slur id -> MusicXML number in use
+        self.slur_open: dict[int, list[int]] = {}  # staff -> numbers of slurs going on in the next system
+        self.key_now = 0
+        pickup = False
+        if p.measures:
+            m0 = p.measures[0]
+            total = _voice_len(m0)
+            pickup = bool(m0.expected and 0 < total < m0.expected and not any(e.full_measure for e in m0.events))
+        for mi, m in enumerate(p.measures):
+            # implicit: the second half of a split measure is not counted by the notation program
+            number = mi if pickup else mi + 1
+            self.measure(p, m, mi, number, implicit=(pickup and mi == 0) or m.implicit)
+        self.w("  </part>")
+
+    def measure(self, p: Part, m: Measure, mi: int, number: int, implicit: bool) -> None:
+        attrs = ' implicit="yes"' if implicit else ""
+        self.w(f'    <measure number="{number}"{attrs}>')
+        att: list[str] = []
+        if mi == 0:
+            att.append(f"<divisions>{self.div}</divisions>")
+        if m.key is not None or mi == 0:
+            att.append(f"<key><fifths>{m.key or 0}</fifths></key>")
+            self.key_now = m.key or 0
+        _mark_accidentals(m, self.key_now)
+        if m.time is not None:
+            sym = f' symbol="{m.time_symbol}"' if m.time_symbol in ("common", "cut") else ""
+            att.append(f"<time{sym}><beats>{m.time[0]}</beats><beat-type>{m.time[1]}</beat-type></time>")
+        elif mi == 0:
+            att.append("<time><beats>4</beats><beat-type>4</beat-type></time>")
+        if mi == 0 and p.staves > 1:
+            att.append(f"<staves>{p.staves}</staves>")
+        for s in sorted(m.clefs):
+            c = m.clefs[s]
+            if mi > 0 and self.clef_now.get(s) == c:
+                continue  # the clef printed at every system start is not a change
+            self.clef_now[s] = c
+            num = f' number="{s}"' if p.staves > 1 else ""
+            oc = f"<clef-octave-change>{c.octave_change}</clef-octave-change>" if c.octave_change else ""
+            line = "" if c.sign == "percussion" else f"<line>{c.line}</line>"
+            att.append(f"<clef{num}><sign>{c.sign}</sign>{line}{oc}</clef>")
+        if mi == 0 and p.transpose:
+            d, c = p.transpose
+            att.append(f"<transpose><diatonic>{d}</diatonic><chromatic>{c}</chromatic></transpose>")
+        if att:
+            self.w("      <attributes>" + "".join(att) + "</attributes>")
+
+        if m.repeat_start or m.ending_start:
+            style = "<bar-style>heavy-light</bar-style>" if m.repeat_start else ""
+            ending = (f'<ending number="{m.ending_start[0]}" type="start">{escape(m.ending_start[1])}</ending>'
+                      if m.ending_start else "")
+            repeat = '<repeat direction="forward"/>' if m.repeat_start else ""
+            self.w(f'      <barline location="left">{style}{ending}{repeat}</barline>')
+        voices = sorted({e.voice for e in m.events}) or [1]
+        expected = m.expected or Fraction(4)
+        full = max([_voice_len(m, v) for v in voices] + [Fraction(0)])
+        measure_len = full if (implicit or m.partial) and full else max(expected, full)
+        pending_dirs = sorted(m.directions, key=lambda d: d.x)
+        pending_clefs = sorted(m.clef_changes, key=lambda c: c[0])
+        first_voice_of_staff: dict[int, int] = {}
+        for v in voices:
+            evs = [e for e in m.events if e.voice == v]
+            if evs:
+                first_voice_of_staff.setdefault(evs[0].staff, v)
+        for vi, v in enumerate(voices):
+            evs = sorted([e for e in m.events if e.voice == v], key=lambda e: e.x)
+            if vi > 0:
+                self.w(f"      <backup><duration>{self.dur(measure_len)}</duration></backup>")
+            pos = Fraction(0)
+            tuplet_acc: list[Fraction] = []
+            for ei, e in enumerate(evs):
+                if first_voice_of_staff.get(e.staff) == v:
+                    while pending_clefs and pending_clefs[0][1] == e.staff and pending_clefs[0][0] <= e.x + 0.5:
+                        _, s, c = pending_clefs.pop(0)
+                        if self.clef_now.get(s) == c:
+                            continue
+                        self.clef_now[s] = c
+                        num = f' number="{s}"' if p.staves > 1 else ""
+                        line = "" if c.sign == "percussion" else f"<line>{c.line}</line>"
+                        self.w(f"      <attributes><clef{num}><sign>{c.sign}</sign>{line}</clef></attributes>")
+                    keep = []
+                    next_x = next((o.x for o in evs[ei + 1:] if o.staff == e.staff), math.inf)
+                    for d in pending_dirs:
+                        # a hairpin starts at the note it begins under; everything else at the next note
+                        opens = d.kind in ("wedge", "octave-shift") and not d.text.startswith("stop")
+                        if d.staff == e.staff and (d.x < next_x - 4 if opens else d.x <= e.x + 2):
+                            self.direction(d, p.staves)
+                        else:
+                            keep.append(d)
+                    pending_dirs = keep
+                tstart = tstop = False
+                if e.tuplet and not e.grace:
+                    if not tuplet_acc:
+                        tstart = True
+                    tuplet_acc.append(_notated(e))
+                    # the group closes once it spans n equal units (and not before every
+                    # note of the smallest value could have filled it: sextuplets, dotted pairs)
+                    total = sum(tuplet_acc)
+                    if _is_power_of_two(total / e.tuplet[0]) and total >= e.tuplet[0] * min(tuplet_acc):
+                        tstop = True
+                        tuplet_acc = []
+                elif tuplet_acc:
+                    tuplet_acc = []
+                self.event(e, p.staves, tstart, tstop)
+                pos += e.duration
+            if pos < measure_len:
+                self.w(f"      <forward><duration>{self.dur(measure_len - pos)}</duration></forward>")
+        for d in pending_dirs:
+            self.direction(d, p.staves)
+        for _, s_, c in pending_clefs:  # a clef change just before the barline
+            if self.clef_now.get(s_) != c:
+                self.clef_now[s_] = c
+                num = f' number="{s_}"' if p.staves > 1 else ""
+                line = "" if c.sign == "percussion" else f"<line>{c.line}</line>"
+                self.w(f"      <attributes><clef{num}><sign>{c.sign}</sign>{line}</clef></attributes>")
+        ending = (f'<ending number="{m.ending_stop[0]}" type="{m.ending_stop[1]}"/>' if m.ending_stop else "")
+        if m.barline == "repeat-end":
+            self.w('      <barline location="right"><bar-style>light-heavy</bar-style>'
+                   f'{ending}<repeat direction="backward"/></barline>')
+        elif m.barline or ending:
+            style = {"final": "light-heavy", "double": "light-light"}.get(m.barline or "", "regular")
+            self.w(f'      <barline location="right"><bar-style>{style}</bar-style>{ending}</barline>')
+        self.w("    </measure>")
+
+    def direction(self, d, staves: int) -> None:
+        place = "above" if d.above else "below"
+        staff = f"<staff>{d.staff}</staff>" if staves > 1 else ""
+        if d.kind == "harmony":
+            xml = harmony_xml(d.text)
+            if xml:
+                self.w("      " + xml.replace("</harmony>", f"{staff}</harmony>"))
+                return
+        if d.kind == "dynamic" and d.text in DYNAMICS:
+            body = f"<dynamics><{d.text}/></dynamics>"
+        elif d.kind == "octave-shift":
+            kind, size = d.text.split()
+            body = f'<octave-shift type="{kind}" size="{size}"/>'
+        elif d.kind == "wedge":
+            body = f'<wedge type="{d.text}"/>'
+        elif d.kind == "rehearsal":
+            body = f'<rehearsal enclosure="square">{escape(d.text)}</rehearsal>'
+        elif d.kind == "tempo":
+            body = f'<words font-weight="bold">{escape(d.text)}</words>'
+        else:
+            body = f"<words>{escape(d.text)}</words>"
+        self.w(f'      <direction placement="{place}"><direction-type>{body}</direction-type>{staff}</direction>')
+
+    def event(self, e: Event, staves: int, tstart: bool, tstop: bool) -> None:
+        tname = TYPE_NAMES.get(e.base)
+        staff = f"<staff>{e.staff}</staff>" if staves > 1 else ""
+        tm = ""
+        if e.tuplet:
+            tm = (f"<time-modification><actual-notes>{e.tuplet[0]}</actual-notes>"
+                  f"<normal-notes>{e.tuplet[1]}</normal-notes></time-modification>")
+        if e.is_rest:
+            hidden = ' print-object="no"' if e.hidden else ""
+            measure_attr = ' measure="yes"' if e.full_measure else ""
+            parts = [f"      <note{hidden}><rest{measure_attr}/><duration>{self.dur(e.duration)}</duration>",
+                     f"<voice>{e.voice}</voice>"]
+            if tname and not e.full_measure:
+                parts.append(f"<type>{tname}</type>" + "<dot/>" * e.dots)
+            parts.append(tm)
+            parts.append(staff)
+            notations = self._tuplet_notation(e, tstart, tstop)
+            if notations:
+                parts.append(f"<notations>{notations}</notations>")
+            parts.append("</note>")
+            self.w("".join(parts))
+            return
+        for i, pt in enumerate(e.pitches):
+            xml = ["      <note>"]
+            if e.grace:
+                xml.append('<grace slash="yes"/>' if e.base <= Fraction(1, 2) else "<grace/>")
+            if i > 0:
+                xml.append("<chord/>")
+            alter = f"<alter>{pt.alter}</alter>" if pt.alter else ""
+            xml.append(f"<pitch><step>{pt.step}</step>{alter}<octave>{pt.octave}</octave></pitch>")
+            if not e.grace:
+                xml.append(f"<duration>{self.dur(e.duration)}</duration>")
+            if pt.tie_stop:
+                xml.append('<tie type="stop"/>')
+            if pt.tie_start:
+                xml.append('<tie type="start"/>')
+            xml.append(f"<voice>{e.voice}</voice>")
+            if tname:
+                xml.append(f"<type>{tname}</type>")
+            xml.append("<dot/>" * e.dots)
+            acc = getattr(pt, "_shown", None)
+            if acc:
+                xml.append(f"<accidental>{acc}</accidental>")
+            xml.append(tm)
+            if e.stem:
+                xml.append(f"<stem>{e.stem}</stem>")
+            if e.notehead:
+                xml.append(f"<notehead>{e.notehead}</notehead>")
+            xml.append(staff)
+            nota = ""
+            if pt.tie_stop:
+                nota += '<tied type="stop"/>'
+            if pt.tie_start:
+                nota += '<tied type="start"/>'
+            if "arpeggiate" in e.articulations:
+                nota += "<arpeggiate/>"  # on every note of the chord
+            if i == 0:
+                nota += self._slur_notation(e)
+                nota += self._tuplet_notation(e, tstart, tstop)
+                groups = {"ornaments": ORNAMENTS, "technical": TECHNICAL}
+                for tag, names in groups.items():
+                    marks = "".join(f"<{a}/>" for a in e.articulations if a in names)
+                    if tag == "ornaments" and e.tremolo:
+                        marks += f'<tremolo type="{e.tremolo[0]}">{min(e.tremolo[1], 4)}</tremolo>'
+                    if marks:
+                        nota += f"<{tag}>{marks}</{tag}>"
+                arts = [a for a in e.articulations
+                        if a not in ("fermata", "arpeggiate") and a not in ORNAMENTS | TECHNICAL]
+                if arts:
+                    nota += "<articulations>" + "".join(f"<{a}/>" for a in arts) + "</articulations>"
+                if "fermata" in e.articulations:
+                    nota += '<fermata type="upright"/>'
+            if nota:
+                xml.append(f"<notations>{nota}</notations>")
+            if i == 0:
+                for verse, text in enumerate(e.lyrics, start=1):
+                    if text:
+                        xml.append(self._lyric(verse, text))
+            xml.append("</note>")
+            self.w("".join(xml))
+
+    def _slur_notation(self, e: Event) -> str:
+        out = []
+        # stops first, so a note that ends one slur and starts the next can reuse the number
+        for kind, sid, place in sorted(e.slurs, key=lambda s: not s[0].startswith("stop")):
+            if kind == "stop":
+                num = self.slur_number.pop(sid, None)
+            elif kind == "stop-open":
+                pending = self.slur_open.get(e.staff) or []
+                num = pending.pop(0) if pending else None
+            else:
+                used = set(self.slur_number.values()) | {n for ns in self.slur_open.values() for n in ns}
+                num = next((n for n in range(1, 7) if n not in used), None)
+                if num is None:  # slurs that never ended (a measure was replaced): start over
+                    self.slur_number.clear()
+                    self.slur_open.clear()
+                    num = 1
+                if kind == "start":
+                    self.slur_number[sid] = num
+                else:
+                    self.slur_open.setdefault(e.staff, []).append(num)
+                out.append(f'<slur type="start" number="{num}" placement="{place}"/>')
+                continue
+            if num is not None:
+                out.append(f'<slur type="stop" number="{num}"/>')
+        return "".join(out)
+
+    def _lyric(self, verse: int, text: str) -> str:
+        """A syllable; a trailing '-' means the word goes on with the next note."""
+        cont = text.endswith("-")
+        word = self.in_word.get(verse, False)
+        syllabic = ("middle" if cont else "end") if word else ("begin" if cont else "single")
+        self.in_word[verse] = cont
+        return (f'<lyric number="{verse}"><syllabic>{syllabic}</syllabic>'
+                f"<text>{escape(text.rstrip('-').strip())}</text></lyric>")
+
+    @staticmethod
+    def _tuplet_notation(e: Event, tstart: bool, tstop: bool) -> str:
+        if not e.tuplet:
+            return ""
+        s = ""
+        if tstart:
+            s += '<tuplet type="start" bracket="no"/>'
+        if tstop:
+            s += '<tuplet type="stop"/>'
+        return s
+
+
+ACCIDENTAL_NAMES = {-2: "flat-flat", -1: "flat", 0: "natural", 1: "sharp", 2: "double-sharp"}
+
+
+def key_alter(fifths: int, step: str) -> int:
+    if fifths > 0:
+        return 1 if step in "FCGDAEB"[:fifths] else 0
+    if fifths < 0:
+        return -1 if step in "BEADGCF"[:-fifths] else 0
+    return 0
+
+
+def _mark_accidentals(m: Measure, fifths: int) -> None:
+    """Decide which notes print an accidental: the ones whose alteration differs from the key
+    signature or from an earlier note on the same line in this measure."""
+    state: dict[tuple[int, str, int], int] = {}
+    for e in sorted(m.events, key=lambda e: (e.x, not e.grace)):
+        for pt in e.pitches:
+            k = (e.staff, pt.step, pt.octave)
+            before = state.get(k, key_alter(fifths, pt.step))
+            state[k] = pt.alter
+            shown = ACCIDENTAL_NAMES.get(pt.alter) if pt.alter != before and not pt.tie_stop else None
+            pt._shown = shown
+
+
+def _notated(e: Event) -> Fraction:
+    d = e.base
+    add = e.base
+    for _ in range(e.dots):
+        add /= 2
+        d += add
+    return d
+
+
+def _voice_len(m: Measure, voice: int | None = None) -> Fraction:
+    if voice is None:
+        voices = {e.voice for e in m.events}
+        return max((_voice_len(m, v) for v in voices), default=Fraction(0))
+    return sum((e.duration for e in m.events if e.voice == voice), Fraction(0))
+
+
+def to_musicxml(score: Score) -> str:
+    return _Writer(score).run()

@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sheet2xml</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg">
+<meta name="theme-color" content="#1f3a5f">
+<style>
+  :root { --bg: #f6f5f2; --card: #fff; --ink: #1d1d1f; --muted: #6b6b70; --accent: #1f3a5f; --line: #dedbd4; --ok: #2f7d4f; --err: #b3261e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151517; --card: #1f1f22; --ink: #ececef; --muted: #a0a0a8; --accent: #8fb4e8; --line: #333338; --ok: #6cc28f; --err: #f2867e; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+  main { max-width: 640px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 24px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px; margin-bottom: 16px; }
+  #drop { border: 2px dashed var(--line); border-radius: 12px; padding: 28px 16px; text-align: center; cursor: pointer; transition: border-color .15s; }
+  #drop.over { border-color: var(--accent); }
+  #drop strong { display: block; margin-bottom: 4px; }
+  #drop span { color: var(--muted); font-size: .9rem; }
+  .buttons { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+  button, .btn { appearance: none; border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 10px; padding: 10px 16px; font: inherit; cursor: pointer; text-decoration: none; display: inline-block; }
+  button.primary, .btn.primary { background: var(--accent); color: var(--card); border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  ul.files { list-style: none; padding: 0; margin: 14px 0 0; }
+  ul.files li { display: flex; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: .95rem; }
+  ul.files li button { padding: 2px 10px; }
+  label.check { display: flex; gap: 10px; align-items: flex-start; margin-top: 14px; color: var(--ink); }
+  label.check small { color: var(--muted); display: block; }
+  #log { margin: 12px 0 0; padding-left: 20px; color: var(--muted); font-size: .95rem; }
+  #log li:last-child { color: var(--ink); }
+  .ok { color: var(--ok); font-weight: 600; }
+  .err { color: var(--err); font-weight: 600; }
+  .hidden { display: none !important; }
+  .meta { color: var(--muted); font-size: .9rem; margin: 8px 0 14px; }
+  .warn { font-size: .9rem; color: var(--muted); }
+  input[type=password] { width: 100%; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); font: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <h1>sheet2xml</h1>
+  <p class="sub">PDF oder Fotos von Noten hochladen und eine MusicXML-Datei für Sibelius, MuseScore, Dorico oder Finale bekommen.</p>
+
+  <div class="card hidden" id="tokenCard">
+    <p>Dieser Server ist geschützt. Bitte den Zugangsschlüssel eingeben.</p>
+    <input type="password" id="token" placeholder="Zugangsschlüssel">
+  </div>
+
+  <div class="card" id="uploadCard">
+    <div id="drop" tabindex="0">
+      <strong>Dateien hierher ziehen oder tippen</strong>
+      <span>Ein PDF oder mehrere Fotos (Seiten in der richtigen Reihenfolge)</span>
+    </div>
+    <input type="file" id="pick" accept="application/pdf,image/*,.heic,.heif" multiple hidden>
+    <input type="file" id="camera" accept="image/*" capture="environment" hidden>
+    <div class="buttons">
+      <button id="pickBtn">Dateien wählen</button>
+      <button id="cameraBtn">Foto aufnehmen</button>
+    </div>
+    <ul class="files" id="files"></ul>
+    <label class="check hidden" id="reviewRow"><input type="checkbox" id="review">
+      <span>Mit Claude prüfen<small>Auffällige Takte werden zusätzlich von der KI kontrolliert (dauert länger).</small></span></label>
+    <div class="buttons"><button class="primary" id="go" disabled>Umwandeln</button></div>
+  </div>
+
+  <div class="card hidden" id="statusCard">
+    <div id="state">Wird hochgeladen …</div>
+    <ol id="log"></ol>
+    <div id="done" class="hidden">
+      <div class="meta" id="meta"></div>
+      <div class="buttons">
+        <a class="btn primary" id="download" href="#">MusicXML herunterladen</a>
+        <button id="again">Neue Noten</button>
+      </div>
+      <p class="warn" id="warnings"></p>
+    </div>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let files = [];
+let needToken = false;
+
+function token() { return $('token').value.trim(); }
+function authHeaders() { return needToken ? { Authorization: 'Bearer ' + token() } : {}; }
+
+try { $('token').value = localStorage.getItem('sheet2xml-token') || ''; } catch (e) {}
+
+fetch('/api/health').then(r => r.json()).then(h => {
+  needToken = h.token;
+  $('tokenCard').classList.toggle('hidden', !h.token);
+  $('reviewRow').classList.toggle('hidden', !h.review);
+}).catch(() => {});
+
+function render() {
+  const ul = $('files');
+  ul.innerHTML = '';
+  files.forEach((f, i) => {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.textContent = `${i + 1}. ${f.name}`;
+    const rm = document.createElement('button');
+    rm.textContent = '×';
+    rm.title = 'Entfernen';
+    rm.onclick = () => { files.splice(i, 1); render(); };
+    li.append(name, rm);
+    ul.append(li);
+  });
+  $('go').disabled = files.length === 0;
+}
+
+function add(list) {
+  for (const f of list) {
+    if (f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')) files = files.filter(x => !x.name.toLowerCase().endsWith('.pdf'));
+    files.push(f);
+  }
+  if (files.some(f => f.name.toLowerCase().endsWith('.pdf')) && files.length > 1) {
+    files = files.filter(f => f.name.toLowerCase().endsWith('.pdf')).slice(-1);
+  }
+  render();
+}
+
+$('pickBtn').onclick = () => $('pick').click();
+$('cameraBtn').onclick = () => $('camera').click();
+$('drop').onclick = () => $('pick').click();
+$('pick').onchange = e => { add(e.target.files); e.target.value = ''; };
+$('camera').onchange = e => { add(e.target.files); e.target.value = ''; };
+['dragenter', 'dragover'].forEach(ev => $('drop').addEventListener(ev, e => { e.preventDefault(); $('drop').classList.add('over'); }));
+['dragleave', 'drop'].forEach(ev => $('drop').addEventListener(ev, e => { e.preventDefault(); $('drop').classList.remove('over'); }));
+$('drop').addEventListener('drop', e => add(e.dataTransfer.files));
+
+$('again').onclick = () => {
+  files = []; render();
+  $('statusCard').classList.add('hidden');
+  $('uploadCard').classList.remove('hidden');
+};
+
+$('go').onclick = async () => {
+  if (needToken) { try { localStorage.setItem('sheet2xml-token', token()); } catch (e) {} }
+  const fd = new FormData();
+  files.forEach(f => fd.append('files', f, f.name));
+  fd.append('review', $('review').checked ? 'true' : 'false');
+  $('uploadCard').classList.add('hidden');
+  $('statusCard').classList.remove('hidden');
+  $('done').classList.add('hidden');
+  $('log').innerHTML = '';
+  $('state').textContent = 'Wird hochgeladen …';
+  $('state').className = '';
+  try {
+    const r = await fetch('/api/jobs', { method: 'POST', body: fd, headers: authHeaders() });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'Hochladen fehlgeschlagen');
+    $('state').textContent = 'Wird umgewandelt …';
+    poll(j.id);
+  } catch (e) { fail(e.message); }
+};
+
+function fail(msg) {
+  $('state').textContent = 'Fehler: ' + msg;
+  $('state').className = 'err';
+  $('done').classList.remove('hidden');
+  $('download').classList.add('hidden');
+}
+
+async function poll(id) {
+  try {
+    const r = await fetch('/api/jobs/' + id, { headers: authHeaders() });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'Status nicht abrufbar');
+    $('log').innerHTML = '';
+    j.messages.forEach(m => { const li = document.createElement('li'); li.textContent = m; $('log').append(li); });
+    if (j.status === 'done') return finish(j);
+    if (j.status === 'error') return fail(j.error);
+    setTimeout(() => poll(id), 1500);
+  } catch (e) { fail(e.message); }
+}
+
+async function finish(j) {
+  $('state').textContent = 'Fertig';
+  $('state').className = 'ok';
+  const parts = j.parts && j.parts.length ? `${j.parts.length} Stimme(n): ${j.parts.join(', ')}` : '';
+  const bits = [j.title, parts, j.measures ? `${j.measures} Takte` : '',
+    j.engine === 'omr' ? 'Notenerkennung (Scan/Foto), bitte gegenlesen' : 'direkt aus dem PDF gelesen'].filter(Boolean);
+  $('meta').textContent = bits.join(' · ');
+  const w = [];
+  if (j.flagged_measures) w.push(`${j.flagged_measures} Takt(e) mit unvollständigem Rhythmus, bitte prüfen.`);
+  (j.warnings || []).forEach(x => w.push(x));
+  $('warnings').textContent = w.join(' ');
+  // fetch as blob so the token header works and the file keeps its name
+  const r = await fetch(j.result, { headers: authHeaders() });
+  const blob = await r.blob();
+  const a = $('download');
+  a.href = URL.createObjectURL(blob);
+  a.download = j.filename || 'noten.musicxml';
+  a.classList.remove('hidden');
+  $('done').classList.remove('hidden');
+}
+</script>
+</body>
+</html>

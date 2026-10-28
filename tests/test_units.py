@@ -1,0 +1,167 @@
+from fractions import Fraction
+
+import numpy as np
+import cv2
+
+from sheet2xml.model import Event, Measure, Part, Pitch, Score
+from sheet2xml.musicxml import to_musicxml
+from sheet2xml.omr.merge import merge_musicxml
+from sheet2xml.omr.preprocess import interline, prepare
+from sheet2xml.transpose import transposition_for
+
+
+def test_transpositions():
+    assert transposition_for("Klarinette in B") == (-1, -2)
+    assert transposition_for("Horn in F") == (-4, -7)
+    assert transposition_for("Violine I") is None
+
+
+def _score() -> Score:
+    m = Measure(number=1, time=(3, 4), key=-1, expected=Fraction(3))
+    m.events = [
+        Event(x=0, duration=Fraction(2), pitches=[Pitch("B", 4, -1)], base=Fraction(2)),
+        Event(x=1, duration=Fraction(1), pitches=[], base=Fraction(1)),
+    ]
+    return Score(title="Test", parts=[Part(name="Flöte", measures=[m])])
+
+
+def test_musicxml_writer():
+    xml = to_musicxml(_score())
+    assert "<fifths>-1</fifths>" in xml
+    assert "<beats>3</beats>" in xml
+    assert "<alter>-1</alter>" in xml
+    assert "<rest" in xml
+    assert "<part-name>Flöte</part-name>" in xml
+
+
+def test_merge_keeps_measures():
+    xml = to_musicxml(_score())
+    merged = merge_musicxml([xml, xml])
+    assert merged.count("<measure ") == 2
+
+
+def _staff_image(spacing: int) -> np.ndarray:
+    img = np.full((800, 1200), 255, np.uint8)
+    for top in (100, 400):
+        for i in range(5):
+            y = top + i * spacing
+            cv2.line(img, (50, y), (1150, y), 0, 2)
+    return img
+
+
+def test_interline_and_rescale():
+    img = _staff_image(12)
+    assert abs(interline(img) - 12) <= 2
+    out = prepare(img, photo=False)
+    assert abs(interline(out) - 22) <= 3
+
+
+def test_tuplet_with_dotted_pair_is_one_group():
+    # dotted eighth, sixteenth, eighth under one "3"
+    m = Measure(number=1, time=(1, 4), expected=Fraction(1))
+    t = (3, 2)
+    m.events = [
+        Event(x=0, duration=Fraction(1, 2), pitches=[Pitch("C", 5)], base=Fraction(1, 2), dots=1, tuplet=t),
+        Event(x=1, duration=Fraction(1, 6), pitches=[Pitch("D", 5)], base=Fraction(1, 4), tuplet=t),
+        Event(x=2, duration=Fraction(1, 3), pitches=[Pitch("E", 5)], base=Fraction(1, 2), tuplet=t),
+    ]
+    xml = to_musicxml(Score(title="T", parts=[Part(name="Fl", measures=[m])]))
+    assert xml.count('<tuplet type="start"') == 1
+    assert xml.count('<tuplet type="stop"') == 1
+
+
+def test_hidden_rests_complete_a_second_voice():
+    from sheet2xml.vector.recognize import SystemReader
+
+    ev = [Event(x=float(i * 10), duration=Fraction(1), pitches=[Pitch("C", 5)], voice=1) for i in range(3)]
+    ev.append(Event(x=10.0, duration=Fraction(1), pitches=[Pitch("A", 4)], voice=2))
+    SystemReader._fill_hidden_rests(None, ev, Fraction(3), 2.0)
+    v2 = sorted((e for e in ev if e.voice == 2), key=lambda e: e.x)
+    assert [e.hidden for e in v2] == [True, False, True]
+    assert sum(e.duration for e in v2) == 3
+
+
+def test_lyrics_syllables():
+    m = Measure(number=1, time=(2, 4), expected=Fraction(2))
+    m.events = [
+        Event(x=0, duration=Fraction(1), pitches=[Pitch("C", 5)], lyrics=["Lie-", "Got-"]),
+        Event(x=1, duration=Fraction(1), pitches=[Pitch("D", 5)], lyrics=["be", "tes"]),
+    ]
+    xml = to_musicxml(Score(title="T", parts=[Part(name="Ch", measures=[m])]))
+    assert '<lyric number="1"><syllabic>begin</syllabic><text>Lie</text></lyric>' in xml
+    assert '<lyric number="2"><syllabic>end</syllabic><text>tes</text></lyric>' in xml
+
+
+def test_chord_symbols():
+    from sheet2xml.musicxml import harmony_xml
+
+    assert "<root-alter>-1</root-alter>" in harmony_xml("Bbmin7/Ab")
+    assert ">minor-seventh</kind>" in harmony_xml("Bbmin7/Ab")
+    assert "<bass-step>A</bass-step><bass-alter>-1</bass-alter>" in harmony_xml("Bbmin7/Ab")
+    assert "<root-step>B</root-step>" in harmony_xml("H7")
+    assert ">none</kind>" in harmony_xml("n.c.")
+    assert ">other</kind>" in harmony_xml("Cadd9")
+    assert harmony_xml("pizz") is None
+
+
+def test_rehearsal_letters():
+    from sheet2xml.model import Direction, Measure, Part
+    from sheet2xml.vector.assemble import _rehearsal_letters
+
+    part = Part(name="Ob", measures=[Measure(number=i) for i in range(1, 5)])
+    for m, letter in zip(part.measures, "ABC"):
+        m.directions.append(Direction(x=0, staff=1, kind="harmony", text=letter))
+    _rehearsal_letters(part)
+    assert all(d.kind == "rehearsal" for m in part.measures for d in m.directions)
+
+
+def test_slurs_endings_and_hairpins():
+    from sheet2xml.model import Direction
+
+    def note(x, slurs):
+        return Event(x=x, duration=Fraction(2), base=Fraction(2), pitches=[Pitch(step="C", octave=5)], slurs=slurs)
+
+    m1 = Measure(number=1, time=(4, 4), key=0, expected=Fraction(4),
+                 events=[note(0, [("start", 1, "above")]), note(10, [])], ending_start=("1", "1."))
+    m1.directions = [Direction(x=1, staff=1, kind="wedge", text="crescendo"),
+                     Direction(x=9, staff=1, kind="wedge", text="stop")]
+    m2 = Measure(number=2, expected=Fraction(4), events=[note(0, [("stop", 1, "above")]), note(10, [])],
+                 ending_stop=("1", "stop"))
+    xml = to_musicxml(Score(parts=[Part(name="V", measures=[m1, m2])]))
+    assert '<slur type="start" number="1" placement="above"/>' in xml
+    assert '<slur type="stop" number="1"/>' in xml
+    assert '<ending number="1" type="start">1.</ending>' in xml
+    assert '<ending number="1" type="stop"/>' in xml
+    # the hairpin opens at the first note and closes before the second
+    assert xml.index('<wedge type="crescendo"/>') < xml.index("<duration>") < xml.index('<wedge type="stop"/>')
+
+
+def test_printed_accidentals_and_arpeggio():
+    m = Measure(number=1, time=(4, 4), key=-1, expected=Fraction(4))
+    m.events = [
+        Event(x=0, duration=Fraction(1), pitches=[Pitch("B", 4, -1)], base=Fraction(1)),  # in the key
+        Event(x=1, duration=Fraction(1), pitches=[Pitch("E", 5, -1)], base=Fraction(1)),  # flat
+        Event(x=2, duration=Fraction(1), pitches=[Pitch("E", 5, -1)], base=Fraction(1)),  # still flat
+        Event(x=3, duration=Fraction(1), pitches=[Pitch("B", 4, 0), Pitch("D", 5)], base=Fraction(1),
+              articulations=["arpeggiate"]),  # natural
+    ]
+    xml = to_musicxml(Score(title="T", parts=[Part(name="Klavier", measures=[m])]))
+    assert xml.count("<accidental>") == 2
+    assert "<accidental>flat</accidental>" in xml and "<accidental>natural</accidental>" in xml
+    assert xml.count("<arpeggiate/>") == 2
+
+
+def test_omr_lyrics_cleanup():
+    from sheet2xml.omr.cleanup import clean_omr
+
+    def note(text):
+        return (f"<note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration>"
+                f"<lyric number=\"1\"><text>{text}</text></lyric></note>")
+    xml = ("<score-partwise><part id=\"P1\">"
+           f"<measure number=\"1\">{note('mf')}{note('===')}</measure>"
+           f"<measure number=\"2\">{note('J')}</measure>"
+           f"<measure number=\"3\">{note('©')}{note('Lorenz')}</measure>"
+           "</part></score-partwise>")
+    out = clean_omr(xml)
+    assert "<lyric" not in out
+    assert out.count("<mf />") + out.count("<mf/>") == 1

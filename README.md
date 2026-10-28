@@ -12,8 +12,13 @@ Als Eingabe gehen PDFs, Scans und Handyfotos.
 
 Ob ein PDF Notensatz-Daten enthält, erkennt das Programm selbst.
 
+Aus PDFs von Notenprogrammen werden außer den Noten auch Liedtexte (mehrere Strophen), Dynamik, Vortrags- und Tempoangaben,
+Akkordsymbole (als echte Akkorde, z.B. `Bbmin7/Ab`) und Studierbuchstaben übernommen.
+
 Takte, deren Rhythmus nicht aufgeht, werden markiert. Mit der Option **Mit Claude prüfen** schickt der Server diese Takte als Bildausschnitt
-zusammen mit der eigenen Lesung an Claude und übernimmt die Korrektur nur, wenn sie rhythmisch stimmt.
+zusammen mit der eigenen Lesung an Claude und übernimmt die Korrektur nur, wenn sie rhythmisch stimmt. Das gilt für PDFs aus
+Notenprogrammen ebenso wie für Scans und Fotos; dort lohnt es sich besonders, weil die Notenerkennung öfter Fähnchen,
+Punkte oder Noten übersieht. Bei Fotos bleiben die erkannten Liedtexte erhalten.
 Dafür braucht der Server einen `ANTHROPIC_API_KEY`.
 
 ## Server starten (Docker, z. B. auf TrueNAS)
@@ -36,11 +41,30 @@ Einstellungen über Umgebungsvariablen (z. B. in einer `.env`-Datei neben `docke
 | `SHEET2XML_WORKERS` | gleichzeitige Umwandlungen (Standard 2) |
 | `SHEET2XML_MAX_UPLOAD_MB` | maximale Uploadgröße (Standard 80) |
 
-**TrueNAS SCALE:** unter *Apps → Discover Apps → Custom App* das Image bauen lassen ist nicht möglich, deshalb entweder
-per Shell `docker compose up -d --build` im geklonten Ordner ausführen oder das Image auf einem anderen Rechner bauen
-(`docker build -t sheet2xml .`) und in eine Registry schieben. Port 8000 freigeben.
+**TrueNAS SCALE:** Jeder Push auf `main` baut das Image automatisch als `ghcr.io/lionhunt3r/sheet2xml:latest`.
+Unter *Apps → Discover Apps → Custom App* dieses Image eintragen, Container-Port 8000 auf einen freien Port legen und
+die Umgebungsvariablen oben nach Bedarf setzen. Ist das Paket auf GitHub privat, vorher unter
+*Package settings → Change visibility* öffentlich machen oder in TrueNAS Zugangsdaten für `ghcr.io` hinterlegen.
+Alternativ per Shell im geklonten Ordner `docker compose up -d --build`.
 
 **Mac mit Apple Silicon:** Docker Desktop installieren, dann wie oben. Das Image ist für x86_64 gebaut und läuft über Rosetta.
+
+## App (Flutter)
+
+Im Ordner `app/` liegt eine Flutter-App für Android, iOS, macOS und Web. Sie spricht mit dem Server:
+Server-Adresse (z. B. `http://truenas.local:8000`) in den Einstellungen eintragen, dann PDF wählen oder
+Seiten fotografieren, umwandeln und die MusicXML-Datei speichern oder per „Teilen“ direkt in MuseScore,
+Sibelius & Co. öffnen.
+
+```bash
+cd app
+flutter run                    # auf angeschlossenem Gerät
+flutter build apk              # Android
+flutter build ios              # iOS (auf dem Mac mit Xcode)
+flutter build macos            # Mac-App
+```
+
+GitHub baut bei jedem Push auf `main` eine Android-APK und die Web-Version (unter *Actions → App → Artifacts*).
 
 ## Kommandozeile
 

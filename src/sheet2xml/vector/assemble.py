@@ -1,0 +1,735 @@
+"""Read a whole vector PDF: pages -> systems -> parts with continuous measures."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from fractions import Fraction
+
+from ..model import Event, Measure, Part, Score
+from ..transpose import transposition_for
+from .extract import PageContent, extract
+from .layout import System, find_staves, find_systems
+from .recognize import StaffContent, SystemReader, _hidden_rest
+
+
+@dataclass
+class SystemRead:
+    page: PageContent
+    system: System
+    groups: list[list[StaffContent]]  # staves grouped into instruments
+    labels: list[str]
+
+
+def _norm(s: str) -> str:
+    s = s.lower().replace("ä", "a").replace("ö", "o").replace("ü", "u").replace("ß", "ss")
+    return re.sub(r"[^a-z0-9 ]", " ", s)
+
+
+_ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "1": 1, "2": 2, "3": 3, "4": 4}
+
+
+def _label_score(label: str, name: str) -> float:
+    """How well an (abbreviated) staff label matches a full instrument name."""
+    a, b = _norm(label).split(), _norm(name).split()
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 3.0
+    num_a = [_ROMAN[t] for t in a if t in _ROMAN]
+    num_b = [_ROMAN[t] for t in b if t in _ROMAN]
+    words_a = [t for t in a if t not in _ROMAN]
+    words_b = [t for t in b if t not in _ROMAN]
+    if num_a != num_b:
+        return 0.1 if words_a and words_b and words_a[0][:1] == words_b[0][:1] else 0.0
+    if not words_a or not words_b:
+        return 1.0
+    wa, wb = words_a[0], " ".join(words_b)
+    if wa[0] != wb[0]:
+        return 0.0
+    # abbreviation letters must appear in order in the full name
+    i = 0
+    for ch in wa:
+        i = wb.find(ch, i)
+        if i < 0:
+            return 0.2
+        i += 1
+    return 2.0
+
+
+def _label_blocks(page: PageContent, system: System) -> list[tuple[float, str]]:
+    """Instrument names left of the system, merged over line breaks: (y, text)."""
+    sp = system.staves[0].space
+    texts = [
+        t for t in page.texts
+        if t.x1 <= system.x0 + 0.5 * sp and system.top - 3 * sp <= t.origin_y <= system.bottom + 3 * sp
+        and not t.text.isdigit()
+    ]
+    texts.sort(key=lambda t: (t.origin_y, t.x0))
+    blocks: list[list] = []
+    for t in texts:
+        if blocks:
+            last = blocks[-1]
+            lt = last[-1]
+            same_line = abs(t.origin_y - lt.origin_y) < 0.5 * t.size
+            next_line = 0 < t.origin_y - lt.origin_y < 1.5 * max(t.size, lt.size) and abs(t.cx - lt.cx) < 6 * sp
+            if same_line or next_line:
+                last.append(t)
+                continue
+        blocks.append([t])
+    out = []
+    for b in blocks:
+        y = (min(t.y0 for t in b) + max(t.y1 for t in b)) / 2
+        out.append((y, " ".join(t.text for t in b).strip()))
+    return out
+
+
+def _group_staves(contents: list[StaffContent], system: System, page: PageContent):
+    """Group staves into instruments and name each group. Returns (groups, labels)."""
+    n = len(contents)
+    own: list[list[str]] = [[] for _ in range(n)]
+    between: dict[int, list[str]] = {}
+    for y, text in _label_blocks(page, system):
+        placed = False
+        for i, c in enumerate(contents):
+            st = c.staff
+            if st.top - 1.0 * st.space <= y <= st.bottom + 1.0 * st.space:
+                own[i].append(text)
+                placed = True
+                break
+        if placed:
+            continue
+        for i in range(n - 1):
+            if contents[i].staff.bottom < y < contents[i + 1].staff.top:
+                between.setdefault(i, []).append(text)
+                break
+    groups: list[list[StaffContent]] = []
+    labels: list[str] = []
+    braces = sorted(system.braces)
+    i = 0
+    while i < n:
+        br = next((b for b in braces if b[0] == i and b[1] - b[0] <= 3), None)
+        if br:
+            idx = list(range(br[0], br[1] + 1))
+            names = [t for k in idx for t in own[k]] + [t for k in idx[:-1] for t in between.get(k, [])]
+            if len(names) <= 1:
+                groups.append([contents[k] for k in idx])
+                labels.append(names[0] if names else "")
+                i = br[1] + 1
+                continue
+        if not own[i] and i + 1 < n and between.get(i) and not own[i + 1]:
+            groups.append([contents[i], contents[i + 1]])
+            labels.append(between[i][0])
+            i += 2
+            continue
+        groups.append([contents[i]])
+        labels.append(own[i][0] if own[i] else "")
+        i += 1
+    for g, lb in zip(groups, labels):
+        for c in g:
+            c.label = lb
+    return groups, labels
+
+
+def read_vector_pdf(path: str) -> Score:
+    pages = extract(path)
+    score = Score(source="vector")
+    reads: list[SystemRead] = []
+    for pc in pages:
+        staves = find_staves(pc)
+        if not staves:
+            continue
+        for sy in find_systems(pc, staves):
+            # carry per staff index inside the system; refined below per part
+            reader = SystemReader(pc, sy, carry={}, page_staves=staves)
+            reads.append(SystemRead(page=pc, system=sy, groups=[], labels=[]))
+            reads[-1]._reader = reader  # type: ignore[attr-defined]
+    if not reads:
+        raise ValueError("Keine Notensysteme im PDF gefunden")
+
+    _fill_metadata(score, pages, reads)
+
+    # instrument groups of every system; the system showing the most groups
+    # (usually the first, but not when the opening omits e.g. choir and piano)
+    # defines the parts, the others are aligned to it
+    layouts = []
+    for sr in reads:
+        reader: SystemReader = sr._reader  # type: ignore[attr-defined]
+        contents_pre = reader._assign()
+        layouts.append(_group_staves(contents_pre, sr.system, sr.page))
+    ref = max(range(len(reads)), key=lambda k: (len(layouts[k][0]), -k))
+    parts: list[Part] = [
+        Part(name=lb or f"Stimme {i + 1}", staves=len(g)) for i, (g, lb) in enumerate(zip(*layouts[ref]))
+    ]
+    mappings: list[list[int]] = [[] for _ in reads]
+    mappings[ref] = list(range(len(parts)))
+    # align the other systems, fullest first; instruments that the reference
+    # system does not show become new parts at their place in the order
+    for k in sorted(range(len(reads)), key=lambda k: (-len(layouts[k][0]), k)):
+        if k == ref:
+            continue
+        groups, labels = layouts[k]
+        mapping = _map_groups(parts, groups, labels, False)
+        for gi, grp in enumerate(groups):
+            if mapping[gi] is not None:
+                continue
+            lo = max([x for x in mapping[:gi] if x is not None], default=-1)
+            hi = min([x for x in mapping[gi + 1:] if x is not None], default=len(parts))
+            free = [j for j in range(lo + 1, hi) if j not in mapping and parts[j].staves == len(grp)]
+            fits = [j for j in free if not labels[gi] or _label_score(labels[gi], parts[j].name) > 0.3]
+            if fits:
+                mapping[gi] = fits[0]
+                continue
+            pos = lo + 1
+            parts.insert(pos, Part(name=labels[gi] or f"Stimme {pos + 1}", staves=len(grp)))
+            for other in mappings:
+                other[:] = [x + 1 if x >= pos else x for x in other]
+            mapping = [x + 1 if x is not None and x >= pos else x for x in mapping]
+            mapping[gi] = pos
+        mappings[k] = mapping  # type: ignore[assignment]
+
+    part_carry: list[dict] = [{} for _ in parts]
+    seen_labels: list[list[str]] = [[] for _ in parts]
+    for k, sr in enumerate(reads):
+        reader = sr._reader  # type: ignore[attr-defined]
+        groups, labels = layouts[k]
+        mapping = mappings[k]
+        key_moves = []
+        for gi, grp in enumerate(groups):
+            pi = mapping[gi]
+            if labels[gi]:
+                seen_labels[pi].append(labels[gi])
+            part = parts[pi]
+            part.staves = max(part.staves, len(grp))
+            for si, sc in enumerate(grp):
+                carry = part_carry[pi].setdefault(si, {})
+                key_before = carry.get("key")
+                reader.carry = {0: carry}
+                reader._read_staff(0, sc, sr.system.barlines)
+                if key_before is not None and carry.get("key") is not None:
+                    key_moves.append(carry["key"] - key_before)
+        _share_signatures(part_carry, {mapping[gi] for gi in range(len(groups))}, key_moves,
+                          [p.staves for p in parts])
+        sr.groups = groups
+        sr.labels = labels
+        sr._mapping = mapping  # type: ignore[attr-defined]
+
+    # full name from the first labelled system, the shortest other label as abbreviation
+    for part, seen in zip(parts, seen_labels):
+        if not seen:
+            continue
+        part.name = seen[0]
+        others = [lb for lb in seen if _norm(lb) != _norm(part.name)]
+        if others:
+            part.abbreviation = min(others, key=len)
+
+    _single_part_name(score, parts, pages, reads)
+    for p in parts:
+        p.transpose = transposition_for(p.name)
+    _stitch(score, parts, reads)
+    _cross_staff_runs(parts)
+    _accept_partial_measures(parts)
+    score.parts = parts
+    return score
+
+
+def _share_signatures(part_carry: list[dict], present: set, key_moves: list[int], staves: list[int]) -> None:
+    """Time and key changes made while a part's staves were hidden still apply to it: the time
+    signature the system's staves agree on, and the key moved by the same number of fifths."""
+    times = [c["time"] for pi in present for c in part_carry[pi].values() if c.get("time")]
+    if not times:
+        return
+    time = max(set(times), key=times.count)
+    symbols = [c.get("time_symbol") for pi in present for c in part_carry[pi].values() if c.get("time") == time]
+    move = max(set(key_moves), key=key_moves.count) if key_moves else 0
+    for pi, carries in enumerate(part_carry):
+        if pi in present:
+            continue
+        for si in range(staves[pi]):
+            c = carries.setdefault(si, {})
+            c["time"] = time
+            c["time_symbol"] = symbols[0] if symbols else None
+            if move and c.get("key") is not None:
+                c["key"] += move
+
+
+def _cross_staff_runs(parts: list[Part]) -> None:
+    """Runs that move between the two staves of a piano or harp (one beamed group below, the
+    next above): each staff on its own is too short, together they fill the measure in the
+    order they stand. Each staff gets its notes at their times and invisible rests between."""
+    for p in parts:
+        if p.staves < 2:
+            continue
+        for m in p.measures:
+            expected = m.expected
+            if not m.warnings or not expected:
+                continue
+            for s in range(1, p.staves):
+                va, vb = 1 + 4 * (s - 1), 1 + 4 * s
+                own = [e for e in m.events if e.voice in (va, vb)]
+                bar_rests = [e for e in own if e.is_rest and (e.full_measure or e.duration >= expected)]
+                timed = sorted((e for e in own if e not in bar_rests and not e.grace and not e.hidden),
+                               key=lambda e: e.x)
+                totals = [sum((e.duration for e in timed if e.voice == v), Fraction(0)) for v in (va, vb)]
+                if not all(0 < t < expected for t in totals) or sum(totals) != expected:
+                    continue
+                sp = min((g[6] for g in getattr(m, "_geoms", [])), default=1.5)
+                if all(e.is_rest for e in timed) or any(
+                        abs(a.x - b.x) < 0.8 * sp for a in timed if a.voice == va for b in timed if b.voice == vb):
+                    continue  # both staves have something at the same time: not one run
+                keep = [e for e in m.events if e.voice not in (va, vb) or (e.grace and e in own)]
+                t = Fraction(0)
+                cur = {va: Fraction(0), vb: Fraction(0)}
+                last_x = {va: 0.0, vb: 0.0}
+                for e in timed:
+                    if t > cur[e.voice]:
+                        keep.append(_hidden(e.x - 0.01, t - cur[e.voice], e.voice, e.staff))
+                    keep.append(e)
+                    t += e.duration
+                    cur[e.voice] = t
+                    last_x[e.voice] = e.x
+                for v, staff in ((va, s), (vb, s + 1)):
+                    if cur[v] < expected:
+                        keep.append(_hidden(last_x[v] + 0.01, expected - cur[v], v, staff))
+                m.events = keep
+            _borrowed_notes(m, expected)
+            if all(sum((e.duration for e in m.events if e.voice == v and not e.grace), Fraction(0)) == expected
+                   for v in {e.voice for e in m.events}):
+                m.warnings = [w for w in m.warnings if not w.startswith("voice")]
+
+
+def _borrowed_notes(m: Measure, expected: Fraction) -> None:
+    """Notes a voice crosses over to the other staff for: one staff is too long by a beamed
+    run, and the other staff has an invisible rest of exactly that length where the run stands.
+    The run stays where it is printed, as a voice of its own timed by that gap."""
+    def total(v):
+        return sum((e.duration for e in m.events if e.voice == v and not e.grace), Fraction(0))
+
+    for vx in sorted({e.voice for e in m.events}):
+        excess = total(vx) - expected
+        if excess <= 0:
+            continue
+        evs = sorted((e for e in m.events if e.voice == vx and not e.grace), key=lambda e: e.x)
+        staff = evs[0].staff
+        free = [v for v in range(1 + 4 * (staff - 1), 5 + 4 * (staff - 1)) if not any(e.voice == v for e in m.events)]
+        if not free:
+            continue
+        for h in [e for e in m.events if e.hidden and e.duration == excess and e.staff != staff]:
+            mine = sorted((e for e in m.events if e.voice == h.voice and not e.grace), key=lambda e: e.x)
+            before = [e for e in mine if e.x < h.x and e is not h]
+            lo = max((e.x for e in before), default=-1e9)
+            hi = min((e.x for e in mine if e.x > h.x), default=1e9)
+            run = [e for e in evs if lo < e.x < hi]
+            if not run or any(e.is_rest or e.base >= 1 for e in run) or len({e.stem for e in run}) != 1 \
+                    or sum(e.duration for e in run) != excess:
+                continue
+            start = sum((e.duration for e in before), Fraction(0))
+            v = free[0]
+            for e in run:
+                e.voice = v
+            if start:
+                m.events.append(_hidden(run[0].x - 0.01, start, v, staff))
+            if start + excess < expected:
+                m.events.append(_hidden(run[-1].x + 0.01, expected - start - excess, v, staff))
+            return
+
+
+def _hidden(x: float, duration: Fraction, voice: int, staff: int) -> Event:
+    e = _hidden_rest(x, duration, voice)
+    e.staff = staff
+    return e
+
+
+def _voice_totals(m: Measure) -> set[Fraction]:
+    return {sum((e.duration for e in m.events if e.voice == v), Fraction(0)) for v in {e.voice for e in m.events}}
+
+
+def _accept_partial_measures(parts: list[Part]) -> None:
+    """Short measures that are normal notation, not reading errors: a pickup at the
+    start of the piece or of a movement, the short last measure, and a measure split
+    in two by a repeat or double barline. They count only if every part agrees."""
+    if not parts or not parts[0].measures:
+        return
+    n = min(len(p.measures) for p in parts)
+
+    def short(i: int) -> Fraction | None:
+        length = None
+        for p in parts:
+            m = p.measures[i]
+            if any(e.full_measure for e in m.events) or not m.events:
+                continue
+            totals = _voice_totals(m)
+            if len(totals) != 1:
+                return None
+            t = next(iter(totals))
+            if not 0 < t < (m.expected or 0) or (length is not None and t != length):
+                return None
+            length = t
+        return length
+
+    lengths = [short(i) for i in range(n)]
+    ok = set()
+    for i, length in enumerate(lengths):
+        if length is None:
+            continue
+        expected = parts[0].measures[i].expected
+        bar = parts[0].measures[i].barline
+        prev_bar = parts[0].measures[i - 1].barline if i else "final"
+        if i == n - 1 or bar in ("final", "repeat-end") or prev_bar in ("final", "repeat-end"):
+            ok.add(i)
+        elif i + 1 < n and lengths[i + 1] is not None and length + lengths[i + 1] == expected:
+            ok |= {i, i + 1}
+            for p in parts:
+                p.measures[i + 1].implicit = i > 0
+    for p in parts:
+        for i in ok:
+            m = p.measures[i]
+            m.partial = True
+            m.warnings = [w for w in m.warnings if not w.startswith("voice")]
+
+
+def _map_groups(parts: list[Part], groups, labels, first: bool) -> list[int | None]:
+    """Map the instrument groups of a system onto the known parts.
+
+    Only the first system creates parts (it normally shows every instrument);
+    later systems are aligned to them in order, using the labels."""
+    n = len(groups)
+    if not parts:
+        return [None] * n
+    m = len(parts)
+
+    def sim(i: int, j: int) -> float:
+        lb = labels[i]
+        p = parts[j]
+        s = (
+            max(_label_score(lb, p.name), _label_score(p.name, lb), _label_score(lb, p.abbreviation or ""))
+            if lb
+            else 0.6
+        )
+        if len(groups[i]) != p.staves:
+            s -= 1.0
+        return s
+
+    if n == m and all(sim(i, i) > 0.3 for i in range(n)):
+        return list(range(n))
+    NEG = -1e9
+    dp = [[NEG] * (m + 1) for _ in range(n + 1)]
+    back: list[list] = [[None] * (m + 1) for _ in range(n + 1)]
+    for j in range(m + 1):
+        dp[0][j] = 0.0
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            if dp[i][j - 1] > dp[i][j]:
+                dp[i][j] = dp[i][j - 1]
+                back[i][j] = ("skip", None)
+            v = dp[i - 1][j - 1] + sim(i - 1, j - 1)
+            if v > dp[i][j]:
+                dp[i][j] = v
+                back[i][j] = ("take", j - 1)
+    out: list[int | None] = [None] * n
+    i, j = n, m
+    while i > 0 and j > 0:
+        step = back[i][j]
+        if step is None:
+            break
+        if step[0] == "take":
+            out[i - 1] = step[1]
+            i, j = i - 1, j - 1
+        else:
+            j -= 1
+    return out
+
+
+def _stitch(score: Score, parts: list[Part], reads: list[SystemRead]) -> None:
+    """Concatenate measures system by system; fill parts missing from a system."""
+    last_time: tuple[int, int] = (4, 4)
+    for sr in reads:
+        mapping = sr._mapping  # type: ignore[attr-defined]
+        # number of measures in this system = max over staves
+        counts = [len(sc.measures) for g in sr.groups for sc in g]
+        if not counts:
+            continue
+        n = max(counts)
+        expansions: list[int] = [1] * n
+        for g in sr.groups:
+            for sc in g:
+                for mi, m in enumerate(sc.measures):
+                    expansions[mi] = max(expansions[mi], m.rest_measures)
+        present = set()
+        for gi, g in enumerate(sr.groups):
+            pi = mapping[gi]
+            if pi is None or pi < 0:
+                continue
+            present.add(pi)
+            part = parts[pi]
+            for mi in range(n):
+                merged = Measure(number=0)
+                ref = None
+                for si, sc in enumerate(g):
+                    if mi < len(sc.measures):
+                        m = sc.measures[mi]
+                    else:
+                        m = Measure(number=0)
+                        m.warnings.append("missing measure")
+                    ref = ref or m
+                    _merge_staff(merged, m, si + 1)
+                _expand(part, merged, expansions[mi])
+                last_time = getattr(ref, "_time", last_time) if ref is not None else last_time
+        for pi, part in enumerate(parts):
+            if pi in present:
+                continue
+            # part hidden in this system (empty staves hidden): add full-measure rests
+            for mi in range(n):
+                tmpl = _template_measure(sr, mi)
+                rest_len = tmpl[0]
+                m = Measure(number=0)
+                for s in range(1, part.staves + 1):
+                    m.events.append(Event(x=0, duration=rest_len, staff=s, voice=4 * (s - 1) + 1,
+                                          base=Fraction(4), full_measure=True))
+                m.expected = rest_len
+                m._time = tmpl[1]  # type: ignore[attr-defined]
+                if tmpl[2] is not None:
+                    m._key = tmpl[2]  # type: ignore[attr-defined]
+                m._filler = True  # type: ignore[attr-defined]
+                _expand(part, m, expansions[mi])
+    _fill_hidden_staves(parts)
+    for part in parts:
+        _rehearsal_letters(part)
+        _lone_chord_names(part)
+    # number measures, compute time/key changes per part
+    for part in parts:
+        prev_time = None
+        prev_key = None
+        for i, m in enumerate(part.measures, start=1):
+            m.number = i
+            t = getattr(m, "_time", None)
+            k = getattr(m, "_key", None)
+            if t and t != prev_time:
+                m.time = t
+                m.time_symbol = getattr(m, "_time_symbol", None)
+                prev_time = t
+            elif m.time == prev_time:
+                m.time = None
+            if k is not None and k != prev_key:
+                m.key = k
+                prev_key = k
+            else:
+                m.key = None if i > 1 else m.key
+    lengths = {len(p.measures) for p in parts}
+    if len(lengths) > 1:
+        score.warnings.append(f"Stimmen haben unterschiedlich viele Takte: {sorted(lengths)}")
+        longest = max(lengths)
+        for p in parts:
+            while len(p.measures) < longest:
+                last = p.measures[-1] if p.measures else None
+                exp = last.expected if last else Fraction(4)
+                m = Measure(number=len(p.measures) + 1, expected=exp)
+                m.events.append(Event(x=0, duration=exp, base=Fraction(4), full_measure=True))
+                p.measures.append(m)
+
+
+def _rehearsal_letters(part: Part) -> None:
+    """Single letters running A, B, C, ... through a part are rehearsal marks, not chords."""
+    marks = []
+    for m in part.measures:
+        seen = set()
+        for d in sorted(m.directions, key=lambda d: d.x):
+            if d.kind in ("harmony", "rehearsal") and len(d.text) == 1 and d.text not in seen:
+                seen.add(d.text)
+                marks.append(d)
+    letters = [ord(d.text) for d in marks]
+    if len(letters) >= 2 and all(b == a + 1 for a, b in zip(letters, letters[1:])) \
+            and (len(letters) >= 3 or letters[0] == ord("A")):
+        for d in marks:
+            d.kind = "rehearsal"
+    for m in part.measures:  # the same mark read on both staves of a piano part
+        seen = set()
+        keep = []
+        for d in m.directions:
+            if d.kind == "rehearsal":
+                if d.text in seen:
+                    continue
+                seen.add(d.text)
+            keep.append(d)
+        m.directions = keep
+
+
+def _lone_chord_names(part: Part) -> None:
+    """A couple of note names in a part without chord symbols (harp pedals, "in Eb") stay text."""
+    chords = [d for m in part.measures for d in m.directions if d.kind == "harmony"]
+    if 0 < len(chords) < 3:
+        for d in chords:
+            d.kind = "words"
+            d.text = re.sub(r"(?<=[A-H])b", "♭", d.text).replace("#", "♯")
+
+
+def _fill_hidden_staves(parts: list[Part]) -> None:
+    """Staves of a part that some systems leave out (empty staves hidden) get rests there,
+    and every staff starts with the clef it shows when it first appears."""
+    for part in parts:
+        if not part.measures:
+            continue
+        first: dict[int, object] = {}
+        for m in part.measures:
+            for s, c in m.clefs.items():
+                first.setdefault(s, c)
+        for s, c in first.items():
+            part.measures[0].clefs.setdefault(s, c)
+        # a hidden part keeps its own key (transposing instruments differ from the template)
+        nxt = None
+        for m in reversed(part.measures):
+            if getattr(m, "_filler", False):
+                if nxt is not None:
+                    m._key = nxt  # type: ignore[attr-defined]
+            elif hasattr(m, "_key"):
+                nxt = m._key  # type: ignore[attr-defined]
+        if part.staves < 2:
+            continue
+        for m in part.measures:
+            have = {e.staff for e in m.events}
+            if not have:
+                continue
+            length = max(sum(e.duration for e in m.events if e.voice == v) for v in {e.voice for e in m.events})
+            for s in range(1, part.staves + 1):
+                if s not in have:
+                    m.events.append(Event(x=0, duration=length, staff=s, voice=4 * (s - 1) + 1,
+                                          base=Fraction(4), full_measure=True))
+
+
+def _template_measure(sr: SystemRead, mi: int):
+    for g in sr.groups:
+        for sc in g:
+            if mi < len(sc.measures):
+                m = sc.measures[mi]
+                return m.expected or Fraction(4), getattr(m, "_time", (4, 4)), getattr(m, "_key", None)
+    return Fraction(4), (4, 4), None
+
+
+def _merge_staff(dst: Measure, src: Measure, staff: int) -> None:
+    if hasattr(src, "_geom"):
+        geoms = getattr(dst, "_geoms", [])
+        geoms.append((staff,) + src._geom)  # type: ignore[attr-defined]
+        dst._geoms = geoms  # type: ignore[attr-defined]
+    for e in src.events:
+        e.staff = staff
+        if staff > 1:
+            e.voice += 4 * (staff - 1)
+        dst.events.append(e)
+    for x, _, c in src.clef_changes:
+        dst.clef_changes.append((x, staff, c))
+    for c in src.clefs.values():
+        dst.clefs[staff] = c
+    for d in src.directions:
+        d.staff = staff
+        dst.directions.append(d)
+    if staff == 1:
+        dst.time = src.time
+        dst.time_symbol = src.time_symbol
+        dst.key = src.key
+        dst.expected = src.expected
+        dst.barline = src.barline
+        dst.repeat_start = src.repeat_start
+        dst.ending_start, dst.ending_stop = src.ending_start, src.ending_stop
+        dst.rest_measures = src.rest_measures
+        for attr in ("_time", "_time_symbol", "_key"):
+            if hasattr(src, attr):
+                setattr(dst, attr, getattr(src, attr))
+    dst.warnings.extend(src.warnings)
+
+
+def _expand(part: Part, m: Measure, count: int) -> None:
+    if count <= 1:
+        part.measures.append(m)
+        return
+    # a multi-measure rest becomes `count` empty measures
+    for k in range(count):
+        mm = Measure(number=0, expected=m.expected)
+        for attr in ("_time", "_time_symbol", "_key"):
+            if hasattr(m, attr):
+                setattr(mm, attr, getattr(m, attr))
+        if k == 0:
+            mm.clefs = m.clefs
+            mm.time, mm.key, mm.time_symbol = m.time, m.key, m.time_symbol
+            mm.directions = m.directions
+        if k == 0:
+            mm.repeat_start = m.repeat_start
+            mm.ending_start = m.ending_start
+        if k == count - 1:
+            mm.barline = m.barline
+            mm.ending_stop = m.ending_stop
+        for s in range(1, part.staves + 1):
+            mm.events.append(Event(x=0, duration=m.expected or Fraction(4), staff=s, base=Fraction(4),
+                                   full_measure=True, voice=1 + 4 * (s - 1)))
+        part.measures.append(mm)
+
+
+def _fill_metadata(score: Score, pages: list[PageContent], reads: list[SystemRead]) -> None:
+    first = pages[0]
+    first_staff_top = None
+    for sr in reads:
+        if sr.page is first or first_staff_top is None:
+            first_staff_top = sr.system.top if first_staff_top is None else first_staff_top
+            break
+    page = reads[0].page if reads else first
+    limit = reads[0].system.top if reads else page.height / 3
+    head = [t for t in page.texts if t.origin_y < limit and len(t.text) > 1]
+    if not head:
+        return
+    biggest = max(head, key=lambda t: t.size)
+    same_line = [t for t in head if abs(t.origin_y - biggest.origin_y) < 2 and t.size >= biggest.size * 0.9]
+    score.title = " ".join(t.text for t in sorted(same_line, key=lambda t: t.x0))
+    sp = reads[0].system.staves[0].space if reads else 2.0
+    # tempo marks and expressions sit just above the first staff
+    rest = [t for t in head if t not in same_line and t.origin_y < limit - 5 * sp and "=" not in t.text]
+    subs = [
+        t for t in rest
+        if t.size >= 0.6 * biggest.size and abs(t.cx - page.width / 2) < page.width * 0.2
+        and t.origin_y < biggest.origin_y + 4 * biggest.size
+    ]
+    if subs:
+        score.subtitle = " ".join(t.text for t in sorted(subs, key=lambda t: t.origin_y))
+    credits = [t for t in rest if t not in subs and (t.x1 > page.width * 0.65 or t.x0 < page.width * 0.3)]
+    composer: list[str] = []
+    lyricist: list[str] = []
+    arranger: list[str] = []
+    last: list[str] | None = None
+    for t in sorted(credits, key=lambda t: t.origin_y):
+        low = t.text.lower()
+        if last is not None and last[-1].rstrip().endswith((",", "&", "und")):
+            target = last  # continuation of the previous line
+        elif re.match(r"(text|worte|dichtung|lyrics|words|deutsch|übers|übertr)", low):
+            target = lyricist
+        elif re.match(r"(melodie|musik|music|komp|weise|composer)", low):
+            target = composer
+        elif re.match(r"(arr|aran|bearb|satz|orch|setting)", low):
+            target = arranger
+        elif t.x1 > page.width * 0.65 and _looks_like_name(t):
+            target = composer
+        else:
+            continue
+        target.append(t.text)
+        last = target
+    score.composer = "\n".join(composer)
+    score.lyricist = "\n".join(lyricist)
+    score.arranger = "\n".join(arranger)
+
+
+def _looks_like_name(t) -> bool:
+    """A composer credit, not a motto or Bible verse (italic, a sentence, "Spr. 24,11") or a tempo mark."""
+    text = t.text.strip()
+    if t.italic or len(text) > 45 or re.search(r"[!?]|\d+\s*,\s*\d+|\b(tempo|rit|rall|accel)", text, re.I):
+        return False
+    return not text.rstrip().endswith((",", ";"))
+
+
+def _single_part_name(score: Score, parts: list[Part], pages, reads) -> None:
+    if len(parts) != 1 or not parts[0].name.startswith("Stimme"):
+        return
+    page = reads[0].page
+    top = reads[0].system.top
+    cands = [
+        t for t in page.texts
+        if t.origin_y < top and t.x0 < page.width * 0.35 and len(t.text) > 2 and t.text not in score.title
+    ]
+    if cands:
+        parts[0].name = min(cands, key=lambda t: t.origin_y).text

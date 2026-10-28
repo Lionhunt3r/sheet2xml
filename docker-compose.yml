@@ -1,0 +1,14 @@
+services:
+  sheet2xml:
+    build: .
+    image: sheet2xml:latest
+    platform: linux/amd64
+    ports:
+      - "8000:8000"
+    environment:
+      # optional: Claude checks measures whose rhythm does not add up
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # optional: protect the server with a key (asked for on the upload page)
+      - SHEET2XML_TOKEN=${SHEET2XML_TOKEN:-}
+      - SHEET2XML_WORKERS=2
+    restart: unless-stopped
