@@ -165,6 +165,7 @@ class _Writer:
         self.in_word: dict[int, bool] = {}  # verse -> the last syllable continues the word
         self.slur_number: dict[int, int] = {}  # slur id -> MusicXML number in use
         self.slur_open: dict[int, list[int]] = {}  # staff -> numbers of slurs going on in the next system
+        self.key_now = 0
         pickup = False
         if p.measures:
             m0 = p.measures[0]
@@ -184,6 +185,8 @@ class _Writer:
             att.append(f"<divisions>{self.div}</divisions>")
         if m.key is not None or mi == 0:
             att.append(f"<key><fifths>{m.key or 0}</fifths></key>")
+            self.key_now = m.key or 0
+        _mark_accidentals(m, self.key_now)
         if m.time is not None:
             sym = f' symbol="{m.time_symbol}"' if m.time_symbol in ("common", "cut") else ""
             att.append(f"<time{sym}><beats>{m.time[0]}</beats><beat-type>{m.time[1]}</beat-type></time>")
@@ -429,6 +432,30 @@ class _Writer:
         if tstop:
             s += '<tuplet type="stop"/>'
         return s
+
+
+ACCIDENTAL_NAMES = {-2: "flat-flat", -1: "flat", 0: "natural", 1: "sharp", 2: "double-sharp"}
+
+
+def key_alter(fifths: int, step: str) -> int:
+    if fifths > 0:
+        return 1 if step in "FCGDAEB"[:fifths] else 0
+    if fifths < 0:
+        return -1 if step in "BEADGCF"[:-fifths] else 0
+    return 0
+
+
+def _mark_accidentals(m: Measure, fifths: int) -> None:
+    """Decide which notes print an accidental: the ones whose alteration differs from the key
+    signature or from an earlier note on the same line in this measure."""
+    state: dict[tuple[int, str, int], int] = {}
+    for e in sorted(m.events, key=lambda e: (e.x, not e.grace)):
+        for pt in e.pitches:
+            k = (e.staff, pt.step, pt.octave)
+            before = state.get(k, key_alter(fifths, pt.step))
+            state[k] = pt.alter
+            shown = ACCIDENTAL_NAMES.get(pt.alter) if pt.alter != before and not pt.tie_stop else None
+            pt._shown = shown
 
 
 def _notated(e: Event) -> Fraction:

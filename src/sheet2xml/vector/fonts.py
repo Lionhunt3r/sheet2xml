@@ -170,6 +170,8 @@ SONATA_SPECIAL: dict[str, str] = {
     "™": "dot",
     "“": "ottava.8",  # followed by "”" (va)
     "{": "brace",
+    "æ": "trem.stroke",  # one tremolo stroke; a note gets as many as are stacked on its stem
+    "~": "head.diamond.whole",
 }
 
 

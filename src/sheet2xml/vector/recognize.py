@@ -37,6 +37,7 @@ HEAD_VALUE = {
     "head.slash": Fraction(1),
     "head.slash.half": Fraction(2),
     "head.slash.whole": Fraction(4),
+    "head.diamond.whole": Fraction(4),
 }
 _SLUR_IDS = itertools.count(1)
 
@@ -678,7 +679,7 @@ class SystemReader:
 
                 if twin and goes_up(other) != goes_up(best):
                     best = other
-            if best is not None and g.name not in ("head.whole", "head.breve", "head.slash.whole"):
+            if best is not None and HEAD_VALUE[g.name] < 4:
                 h.stem = best
                 by_stem.setdefault(id(best), []).append(h)
             else:
@@ -722,12 +723,19 @@ class SystemReader:
                     break
         for g in glyphs:
             if g.name.startswith("trem."):
-                near = [c for c in chords if c.stem is not None and abs(c.stem.x0 - (g.x0 + g.x1) / 2) < 1.0 * sp
+                gx = (g.x0 + g.x1) / 2
+                near = [c for c in chords if c.stem is not None and abs(c.stem.x0 - gx) < 1.0 * sp
                         and min(c.stem.y0, c.stem.y1) - 2 * sp <= g.y <= max(c.stem.y0, c.stem.y1) + 2 * sp]
+                if not near:  # whole notes
+                    near = [c for c in chords if c.stem is None and abs(c.x - g.x) < 1.5 * sp
+                            and min(abs(h.glyph.y - g.y) for h in c.heads) < 4 * sp]
                 if not near:
-                    near = [c for c in chords if abs(c.x - g.x) < 1.5 * sp]  # whole notes
-                if near:
-                    min(near, key=lambda c: abs(c.x - g.x)).tremolo = ("single", int(g.name.split(".")[1]))
+                    continue
+                c = min(near, key=lambda c: abs(c.x - g.x))
+                if g.name == "trem.stroke":  # Sonata draws each stroke as its own glyph
+                    c.tremolo = ("single", c.tremolo[1] + 1 if c.tremolo else 1)
+                else:
+                    c.tremolo = ("single", int(g.name.split(".")[1]))
         longs = sorted((c for c in chords if c.value >= 2 and not c.grace), key=lambda c: c.x)
         for left, right in zip(longs, longs[1:]):
             lx = left.stem.x0 if left.stem is not None else max(h.glyph.x1 for h in left.heads)
@@ -1474,7 +1482,9 @@ class SystemReader:
                     tremolo=it.tremolo,
                     base=it.value, dots=it.dots, tuplet=it.tuplet, grace=it.grace, stem=it.direction,
                     articulations=list(it.articulations), slurs=list(it.slurs),
-                    notehead="slash" if any(h.glyph.name.startswith("head.slash") for h in it.heads) else None,
+                    notehead=("slash" if any(h.glyph.name.startswith("head.slash") for h in it.heads)
+                              else "diamond" if any(h.glyph.name.startswith("head.diamond") for h in it.heads)
+                              else None),
                 )
                 if it.grace:
                     ev.duration = Fraction(0)
