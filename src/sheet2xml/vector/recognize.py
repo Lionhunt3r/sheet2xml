@@ -1251,8 +1251,8 @@ class SystemReader:
                     if g.name.startswith("time.") and g.name[5:].isdigit()
                     and p.x0 - sp <= g.cx <= p.x1 + sp and st.top - 4 * sp <= g.y < st.top + 0.5 * sp
                 ]
+                digits = _number_over((p.x0 + p.x1) / 2, digits, sp)
                 if digits:
-                    digits.sort(key=lambda g: g.x)
                     n = int("".join(g.name[5:] for g in digits))
                     used_ids |= {id(g) for g in digits}
                     out.append(((p.x0 + p.x1) / 2, n))
@@ -1263,8 +1263,8 @@ class SystemReader:
                     if d.name.startswith("time.") and d.name[5:].isdigit() and g.x0 - sp <= d.cx <= g.x1 + sp
                     and d.y < st.top + 0.5 * sp
                 ]
+                digits = _number_over(g.cx, digits, sp)
                 if digits:
-                    digits.sort(key=lambda d: d.x)
                     used_ids |= {id(d) for d in digits}
                     out.append((g.cx, int("".join(d.name[5:] for d in digits))))
         return out
@@ -1627,6 +1627,21 @@ def _parse_time(digits: list[Glyph], st: Staff):
         return (int("".join(g.name[5:] for g in top)), int("".join(g.name[5:] for g in bot))), None
     except ValueError:
         return None, None
+
+
+def _number_over(cx: float, digits: list, sp: float) -> list:
+    """The digits that form the number over a long rest: one row of digits standing side by side,
+    the one nearest to the middle of the bar. Other digits above the staff (a metronome mark,
+    a measure number) are not part of it."""
+    groups: list[list] = []
+    for d in sorted(digits, key=lambda d: d.x):
+        if groups and d.x - groups[-1][-1].x < 2.5 * sp and abs(d.y - groups[-1][-1].y) < 0.5 * sp:
+            groups[-1].append(d)
+        else:
+            groups.append([d])
+    if not groups:
+        return []
+    return min(groups, key=lambda g: abs((g[0].x + g[-1].x1) / 2 - cx))
 
 
 def _cluster_x(glyphs: list[Glyph], gap: float, by_gap: bool = False) -> list[list[Glyph]]:

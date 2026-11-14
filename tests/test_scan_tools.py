@@ -105,3 +105,15 @@ def test_score_of_the_reference_itself():
     assert s["pitch_and_rhythm"] == 1.0 and s["pitch_only"] == 1.0
     assert s["parts_result"] == s["parts_reference"] == 4
     assert all(found == expected for found, expected in s["marks"].values())
+
+
+def test_number_over_a_long_rest_ignores_other_digits():
+    from types import SimpleNamespace as G
+
+    from sheet2xml.vector.recognize import _number_over
+
+    sp = 5.0
+    tempo = [G(name="time.6", x=214.0, x1=214.8, y=151.2), G(name="time.0", x=214.9, x1=215.7, y=151.2)]
+    count = [G(name="time.3", x=325.3, x1=333.0, y=158.6), G(name="time.2", x=316.1, x1=324.0, y=158.6)]
+    assert [g.name for g in _number_over(325.0, tempo + count, sp)] == ["time.2", "time.3"]
+    assert _number_over(325.0, [], sp) == []
