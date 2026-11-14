@@ -67,18 +67,40 @@ def read_mxl(path: str) -> str:
         return z.read(root).decode("utf-8")
 
 
-def run_audiveris(inputs: list[str], timeout: int = 900, keep_dir: str | None = None) -> list[str]:
+# Audiveris ships with these recognitions switched off (ProcessingSwitches); our music needs them:
+# tremolo strokes on a stem, triplets printed without their "3", chord symbols above the staff.
+# AUDIVERIS_SWITCHES overrides the list, e.g. "tremolos,implicitTuplets,chordNames,smallHeads" or "" for none.
+DEFAULT_SWITCHES = ("tremolos", "implicitTuplets", "chordNames")
+
+
+def switches() -> tuple[str, ...]:
+    env = os.environ.get("AUDIVERIS_SWITCHES")
+    if env is None:
+        return DEFAULT_SWITCHES
+    return tuple(s.strip() for s in env.split(",") if s.strip())
+
+
+def command(binary: str, out_dir: str, inputs: list[str], on: tuple[str, ...] | None = None) -> list[str]:
+    # lyrics and chord symbols are read with Tesseract (German + English)
+    cmd = [binary, "-batch", "-export", "-output", out_dir,
+           "-constant", "org.audiveris.omr.text.Language.defaultSpecification=deu+eng"]
+    for name in switches() if on is None else on:
+        cmd += ["-constant", f"org.audiveris.omr.sheet.ProcessingSwitches.{name}=true"]
+    return [*cmd, "--", *inputs]
+
+
+def run_audiveris(inputs: list[str], timeout: int = 900, keep_dir: str | None = None,
+                  on: tuple[str, ...] | None = None) -> list[str]:
     """Run Audiveris on images/PDFs; returns MusicXML strings (one per exported file).
 
-    keep_dir: copy Audiveris' project files (.omr, with the geometry of what it read) there."""
+    keep_dir: copy Audiveris' project files (.omr, with the geometry of what it read) there.
+    on: the processing switches to turn on (default: switches())."""
     binary = audiveris_binary()
     if not binary:
         raise OMRError("Audiveris ist nicht installiert (AUDIVERIS_BIN setzen)")
     out_dir = tempfile.mkdtemp(prefix="audiveris-")
     try:
-        # lyrics and chord symbols are read with Tesseract (German + English)
-        cmd = [binary, "-batch", "-export", "-output", out_dir,
-               "-constant", "org.audiveris.omr.text.Language.defaultSpecification=deu+eng", "--", *inputs]
+        cmd = command(binary, out_dir, inputs, on)
         env = dict(os.environ)
         env.setdefault("JAVA_TOOL_OPTIONS", "")
         env["JAVA_TOOL_OPTIONS"] += " -Djava.awt.headless=true"

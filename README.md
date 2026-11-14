@@ -40,6 +40,7 @@ Einstellungen über Umgebungsvariablen (z. B. in einer `.env`-Datei neben `docke
 | `SHEET2XML_TOKEN` | schützt den Server mit einem Zugangsschlüssel |
 | `SHEET2XML_WORKERS` | gleichzeitige Umwandlungen (Standard 2) |
 | `SHEET2XML_MAX_UPLOAD_MB` | maximale Uploadgröße (Standard 80) |
+| `AUDIVERIS_SWITCHES` | Audiveris-Erkennungen, die zusätzlich eingeschaltet werden (Standard `tremolos,implicitTuplets,chordNames`; z. B. `smallHeads` für Stichnoten ergänzen) |
 
 **TrueNAS SCALE:** Jeder Push auf `main` baut das Image automatisch als `ghcr.io/lionhunt3r/sheet2xml:latest`.
 Unter *Apps → Discover Apps → Custom App* dieses Image eintragen, Container-Port 8000 auf einen freien Port legen und
@@ -98,10 +99,25 @@ pytest
 python tools/evaluate.py ergebnis.musicxml referenz.mxl   # Vergleich mit einer Referenz
 ```
 
+### Erkennung von Scans und Fotos messen
+
+`tools/scanbench.py` misst die Erkenner an einer festen Reihe von Stücken. Aus einem PDF eines Notenprogramms
+macht `tools/degrade.py` künstliche Scans, Kopien und Handyfotos; die richtige Lösung liefert unser PDF-Leser.
+Echte Scans werden gelesen, wie sie sind; dort zählt das Werkzeug Takte mit Rhythmusfehlern und die gefundenen Zeichen.
+
+```bash
+python tools/scanbench.py tools/scanbench-beispiel.json ergebnisse/ --engines audiveris-plain,audiveris,homr,copisteria
+```
+
+Erkenner: `audiveris` (mit unseren Schaltern), `audiveris-plain` (Werkseinstellung),
+[`homr`](https://github.com/liebharc/homr) und [`copisteria`](https://github.com/kobimusic/copisteria).
+Die beiden letzten werden in eigenen Umgebungen installiert und über `HOMR_BIN` bzw. `COPISTERIA_HOME` und
+`COPISTERIA_PYTHON` gefunden (siehe `src/sheet2xml/omr/engines.py`).
+
 Aufbau des Codes:
 
 - `src/sheet2xml/vector/`: PDF aus Notenprogrammen lesen (Schriften, Notenzeilen und Systeme, Symbole, Stimmen zuordnen)
-- `src/sheet2xml/omr/`: Bildaufbereitung und Audiveris
+- `src/sheet2xml/omr/`: Bildaufbereitung, Audiveris und die Aufrufe weiterer Erkenner (`engines.py`)
 - `src/sheet2xml/review.py`: Prüfung auffälliger Takte durch Claude
 - `src/sheet2xml/musicxml.py`: MusicXML schreiben
 - `src/sheet2xml/web/`: API und Upload-Seite
