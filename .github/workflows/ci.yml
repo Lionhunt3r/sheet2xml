@@ -27,5 +27,6 @@ jobs:
         with:
           channel: stable
       - run: flutter pub get
-      - run: flutter analyze
+      # a new Flutter release may deprecate what the app uses; that is a note, not a failure
+      - run: flutter analyze --no-fatal-infos
       - run: flutter test
