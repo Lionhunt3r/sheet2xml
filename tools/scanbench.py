@@ -22,7 +22,8 @@ rhythm does not add up are counted. Results go to out_dir/results.json and resul
 recognised files are kept in out_dir and reused on the next run.
 
 Recognisers: audiveris (with our processing switches), audiveris-plain (as shipped),
-homr, copisteria (see src/sheet2xml/omr/engines.py for how to install the last two).
+homr, copisteria (see src/sheet2xml/omr/engines.py for how to install the last two), and
+combined: the three readings made into one (src/sheet2xml/omr/combine.py); name it last.
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ from degrade import degrade, render  # noqa: E402
 from evaluate import count_marks, read_xml, score  # noqa: E402
 
 from sheet2xml.omr.cleanup import clean_omr  # noqa: E402
+from sheet2xml.omr.combine import ORDER, combine  # noqa: E402
 from sheet2xml.omr.engines import run_engine  # noqa: E402
 from sheet2xml.omr.preprocess import prepare_file  # noqa: E402
 from sheet2xml.omr.review import find_problems  # noqa: E402
@@ -81,11 +83,16 @@ def make_images(pdf: str, kind: str, out_dir: str) -> list[str]:
 
 def recognise(engine: str, images: list[str], out_file: str) -> tuple[str | None, float, str]:
     """(path of the MusicXML or None, seconds, error)."""
-    if os.path.exists(out_file):
+    if os.path.exists(out_file) and engine != "combined":
         return out_file, 0.0, ""
     start = time.time()
     try:
-        if engine == "audiveris-plain":
+        if engine == "combined":
+            folder = Path(out_file).parent
+            read = {e: (folder / f"{e}.musicxml").read_text(encoding="utf-8")
+                    for e in ORDER if (folder / f"{e}.musicxml").exists()}
+            xml = combine(read).xml
+        elif engine == "audiveris-plain":
             xml = clean_omr(run_engine("audiveris", images, on=()))
         elif engine == "audiveris":
             xml = clean_omr(run_engine("audiveris", images))
@@ -151,9 +158,11 @@ def run(cases: list[dict], out: str, engines: list[str], kinds: list[str], jobs:
             images = make_images(pdf, kind, kdir)
             for engine in engines:
                 tasks.append((case, kind, engine, images, reference, kdir))
+    # "combined" is made from what the single recognisers left behind, so it runs after them
+    first = [t for t in tasks if t[2] != "combined"]
     with ThreadPoolExecutor(max_workers=jobs) as pool:
-        rows = list(pool.map(lambda t: measure(*t), tasks))
-    return rows
+        done = dict(zip(map(id, first), pool.map(lambda t: measure(*t), first)))
+    return [done[id(t)] if id(t) in done else measure(*t) for t in tasks]
 
 
 def _pct(x) -> str:

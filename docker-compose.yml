@@ -11,4 +11,6 @@ services:
       # optional: protect the server with a key (asked for on the upload page)
       - SHEET2XML_TOKEN=${SHEET2XML_TOKEN:-}
       - SHEET2XML_WORKERS=2
+      # optional: which recognisers read scans and photos (default: all three, homr,copisteria,audiveris)
+      - SHEET2XML_ENGINES=${SHEET2XML_ENGINES:-}
     restart: unless-stopped

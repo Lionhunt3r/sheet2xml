@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     out = Path(args.output) if args.output else Path(args.inputs[0]).with_suffix(".musicxml")
     out.write_text(res.musicxml, encoding="utf-8")
     if not args.quiet:
-        info = f"{res.engine}"
+        info = f"{res.engine}" + (f" mit {', '.join(res.engines)}" if res.engines else "")
         if res.parts:
             info += f", {len(res.parts)} Stimme(n), {res.measures} Takte"
         if res.flagged_measures:

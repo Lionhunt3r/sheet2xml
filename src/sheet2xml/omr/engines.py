@@ -24,6 +24,7 @@ from pathlib import Path
 import pymupdf
 
 from .audiveris import OMRError, audiveris_binary, run_audiveris
+from .cleanup import clean_homr
 from .merge import merge_musicxml
 
 ENGINES = ("audiveris", "homr", "copisteria")
@@ -118,7 +119,7 @@ def run_engine(name: str, images: list[str], keep_dir: str | None = None, **opti
             book = images_to_book(images, os.path.join(tmp, "noten.pdf"))
             return merge_musicxml(run_audiveris([book], keep_dir=keep_dir, **options))
     if name == "homr":
-        return run_homr(images)
+        return clean_homr(run_homr(images))
     if name == "copisteria":
         return run_copisteria(images)
     raise OMRError(f"Unbekannter Erkenner: {name}")

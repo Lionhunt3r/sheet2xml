@@ -71,3 +71,17 @@ def test_omr_review_replaces_short_measure(tmp_path):
     assert notes[0].findtext("lyric/text") == "Tag"  # the lyric read before is kept
     assert list(m2)[-1].tag == "barline"
     assert not find_problems(root)
+
+
+def test_omr_review_finds_the_measure_through_another_recognisers_numbering(tmp_path):
+    """The score comes from another recogniser: its measure 2 is Audiveris' measure 1 on the page."""
+    omr = tmp_path / "book.omr"
+    with zipfile.ZipFile(omr, "w") as z:
+        z.writestr("sheet#1/sheet#1.xml", SHEET.replace('<stack id="2" left="400" right="700"/>', ""))
+    img = tmp_path / "page.png"
+    Image.new("L", (800, 400), 255).save(img)
+    client = _Client()
+    out, fixed = review_omr(XML, str(omr), [str(img)], client=client, where={(0, 1): 0})
+    assert fixed == 1 and client.calls == 1
+    out, fixed = review_omr(XML, str(omr), [str(img)], client=_Client(), where={})
+    assert fixed == 0, "a measure Audiveris did not see cannot be shown to Claude"

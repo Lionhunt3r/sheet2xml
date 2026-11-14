@@ -29,6 +29,7 @@ from fastapi.responses import FileResponse, Response
 from .. import __version__
 from ..omr import IMAGE_EXT
 from ..omr import available as omr_available
+from ..omr import chosen_engines
 from ..pipeline import convert
 from ..review import available as review_available
 
@@ -94,6 +95,7 @@ def _run(job: Job) -> None:
         Path(job.dir, "result.musicxml").write_text(res.musicxml, encoding="utf-8")
         job.info = {
             "engine": res.engine,
+            "engines": res.engines,
             "title": res.title,
             "parts": res.parts,
             "measures": res.measures,
@@ -121,7 +123,8 @@ def _public(job: Job) -> dict:
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"version": __version__, "omr": omr_available(), "review": review_available(), "token": bool(TOKEN)}
+    return {"version": __version__, "omr": omr_available(), "engines": chosen_engines(),
+            "review": review_available(), "token": bool(TOKEN)}
 
 
 @app.post("/api/jobs", dependencies=[Depends(check_token)])

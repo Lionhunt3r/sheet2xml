@@ -245,8 +245,12 @@ def replace_measure(part: ET.Element, p: Problem, events, staves: int) -> bool:
     return True
 
 
-def review_omr(xml: str, omr_path: str, images: list[str], progress=None, client=None) -> tuple[str, int]:
-    """Check suspicious measures with Claude. Returns (musicxml, corrected measures)."""
+def review_omr(xml: str, omr_path: str, images: list[str], progress=None, client=None,
+               where: dict[tuple[int, int], int] | None = None) -> tuple[str, int]:
+    """Check suspicious measures with Claude. Returns (musicxml, corrected measures).
+
+    where: if the score is not Audiveris' own export, the Audiveris measure that each of its
+    measures (part index, measure index) corresponds to; measures without one are not checked."""
     from ..review import MAX_MEASURES, ask_claude, available, events_from_fix
 
     say = progress or (lambda s: None)
@@ -265,7 +269,7 @@ def review_omr(xml: str, omr_path: str, images: list[str], progress=None, client
     boxes = read_layout(omr_path)
     parts = root.findall("part")
     n_measures = len(parts[0].findall("measure")) if parts else 0
-    if len(boxes) != n_measures:
+    if where is None and len(boxes) != n_measures:
         log.warning("Audiveris layout has %d measures, MusicXML %d: no review", len(boxes), n_measures)
         say("Claude-Prüfung übersprungen: Takte ließen sich dem Bild nicht zuordnen")
         return xml, 0
@@ -278,7 +282,10 @@ def review_omr(xml: str, omr_path: str, images: list[str], progress=None, client
     pages = [Image.open(p) for p in images]
     jobs = []
     for p in problems:
-        box = boxes[p.index]
+        at = p.index if where is None else where.get((p.part, p.index))
+        if at is None or at >= len(boxes):
+            continue
+        box = boxes[at]
         if box.sheet >= len(pages):
             continue
         crop = _crop(pages[box.sheet], box, p.part)

@@ -30,3 +30,27 @@ jobs:
       # a new Flutter release may deprecate what the app uses; that is a note, not a failure
       - run: flutter analyze --no-fatal-infos
       - run: flutter test
+
+  # the image must build, find its three recognisers and read a page with them as the user it runs as
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: sheet2xml:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: All recognisers are found
+        run: |
+          docker run --rm sheet2xml:ci python -c "from sheet2xml.omr import chosen_engines as c; print(c()); assert c() == ['homr', 'copisteria', 'audiveris']"
+      - name: A page is read by all of them
+        run: |
+          mkdir out && chmod 777 out
+          docker run --rm -v "$PWD/tests/data:/data:ro" -v "$PWD/out:/out" sheet2xml:ci \
+            sheet2xml /data/bach_bwv66_6.pdf --engine omr -o /out/bach.musicxml 2>&1 | tee out/log.txt
+          grep -q "mit homr, copisteria, audiveris" out/log.txt
+          grep -c "<measure" out/bach.musicxml
