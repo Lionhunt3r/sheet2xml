@@ -179,3 +179,18 @@ def test_ties_seen_by_a_recogniser_that_agrees_are_taken():
     assert ties[3] == ["start"] and ties[4] == ["stop"], "the missing end of the base's own tie"
     assert ties[7] == [] and ties[8] == [], "B to C is not a tie, whatever one recogniser says"
     assert all(len(n.findall("tie")) == len(n.findall("notations/tied")) for n in part.iter("note"))
+
+
+def test_upbeat_is_recognised_and_not_reported_as_an_error():
+    from sheet2xml.omr.review import find_problems
+
+    homr = score([note("G", 4, 1), four("CDEF"), four("GAB")])
+    cop = score([note("G", 4, 1), four("CDEF"), four("GAB")])
+    c = combine({"homr": homr, "copisteria": cop})
+    root = ET.fromstring(c.xml.split("?>", 1)[1])
+    assert root.find("part/measure").get("implicit") == "yes"
+    assert find_problems(root) == []
+    # a short first measure that nothing completes is a reading error, not an upbeat
+    c = combine({"homr": score([note("G", 4, 1), four("CDEF"), four("GABC")]), "copisteria": cop})
+    root = ET.fromstring(c.xml.split("?>", 1)[1])
+    assert root.find("part/measure").get("implicit") is None and len(find_problems(root)) == 1

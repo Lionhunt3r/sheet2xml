@@ -52,5 +52,7 @@ jobs:
           mkdir out && chmod 777 out
           docker run --rm -v "$PWD/tests/data:/data:ro" -v "$PWD/out:/out" sheet2xml:ci \
             sheet2xml /data/bach_bwv66_6.pdf --engine omr -o /out/bach.musicxml 2>&1 | tee out/log.txt
-          grep -q "mit homr, copisteria, audiveris" out/log.txt
+          grep -q "3 Erkenner lesen die Seiten" out/log.txt
+          grep -q "omr mit homr" out/log.txt
+          for name in homr copisteria Audiveris; do ! grep -q "$name ist ausgefallen" out/log.txt; done
           grep -c "<measure" out/bach.musicxml

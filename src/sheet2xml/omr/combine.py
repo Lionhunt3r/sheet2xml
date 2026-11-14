@@ -573,6 +573,33 @@ def _lengthen_rests(part: ET.Element, mine: list[Reading], other: list[Reading],
     return len(changes)
 
 
+def _mark_upbeat(parts: list[ET.Element], others: list[ET.Element]) -> bool:
+    """A piece may begin with an incomplete measure. Not every recogniser says so, and then the
+    upbeat looks like a measure with notes missing. It is one if every part begins equally short
+    and either the last measure makes up for it or another recogniser read an upbeat there."""
+    firsts = []
+    for part in parts:
+        readings = read_part(part)
+        if not readings:
+            return False
+        firsts.append((readings[0], readings[-1]))
+    if all(first.element.get("implicit") == "yes" for first, _ in firsts):
+        return False
+    full = Fraction(firsts[0][0].time[0] * 4, firsts[0][0].time[1])
+    lengths = {max(first.totals, default=Fraction(0)) for first, _ in firsts}
+    if len(lengths) != 1 or not Fraction(0) < next(iter(lengths)) < full:
+        return False
+    short = next(iter(lengths))
+    completed = any(len(part.findall("measure")) > 1 and last.totals and max(last.totals) + short == full
+                    for part, (_, last) in zip(parts, firsts))
+    seen_elsewhere = any(m is not None and m.get("implicit") == "yes" for m in (o.find("measure") for o in others))
+    if not (completed or seen_elsewhere):
+        return False
+    for first, _ in firsts:
+        first.element.set("implicit", "yes")
+    return True
+
+
 def combine(readings: dict[str, str], order: tuple[str, ...] = ORDER) -> Combined:
     """One MusicXML out of the MusicXML of several recognisers (name -> text) for the same pages."""
     names = [n for n in order if n in readings] + [n for n in readings if n not in order]
@@ -671,6 +698,7 @@ def combine(readings: dict[str, str], order: tuple[str, ...] = ORDER) -> Combine
                 _balance_wedges(part)
             if _count(part, kind):
                 result.borrowed[KIND_NAMES[kind]] = lender
+    _mark_upbeat(base_parts, [p for n in used[1:] for p in roots[n].findall("part")])
     put_in_order(base_root)
     header = '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n'
     result.xml = header + ET.tostring(base_root, encoding="unicode")

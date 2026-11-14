@@ -106,7 +106,9 @@ def find_problems(root: ET.Element) -> list[Problem]:
         key = 0
         staves = 1
         clefs: dict[int, str] = {}
-        for mi, m in enumerate(part.findall("measure")):
+        measures = part.findall("measure")
+        upbeat: Fraction | None = None  # how long the incomplete first measure is, in quarter notes
+        for mi, m in enumerate(measures):
             for att in m.findall("attributes"):
                 if att.findtext("divisions"):
                     divisions = int(float(att.findtext("divisions")))
@@ -135,6 +137,12 @@ def find_problems(root: ET.Element) -> list[Problem]:
                     v = el.findtext("voice")
                     totals[v] = totals.get(v, 0) + int(float(el.findtext("duration") or 0))
             if m.get("implicit") == "yes" or not totals:
+                if mi == 0 and totals:
+                    upbeat = Fraction(max(totals.values()), divisions)
+                continue
+            # the last measure of a piece that begins with an upbeat is short by that upbeat
+            if upbeat is not None and mi == len(measures) - 1 and \
+                    all(Fraction(t, divisions) + upbeat == expected for t in totals.values()):
                 continue
             if m.find("attributes/measure-style/multiple-rest") is not None:
                 continue
