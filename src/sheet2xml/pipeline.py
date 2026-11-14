@@ -27,6 +27,7 @@ class Result:
     warnings: list[str] = field(default_factory=list)
     flagged_measures: int = 0
     reviewed: bool = False
+    engines: list[str] = field(default_factory=list)  # for scans: the recognisers whose reading went in
 
 
 def pdf_kind(path: str) -> str:
@@ -91,12 +92,17 @@ def convert(paths: list[str] | str, engine: str = "auto", review: bool = False, 
 
 
 def _omr(paths: list[str], say, review: bool = False) -> Result:
-    from .omr import recognize_files
+    from .omr import recognize
 
-    say("Bild wird aufbereitet und mit Audiveris erkannt (kann 1–3 Minuten dauern)")
-    xml = recognize_files(paths, review=review, progress=say)
-    res = _result_from_omr(xml)
+    say("Bild wird aufbereitet und erkannt (kann einige Minuten dauern)")
+    rec = recognize(paths, review=review, progress=say)
+    res = _result_from_omr(rec.xml)
     res.reviewed = review
+    res.engines = rec.engines
+    res.warnings += rec.notes
+    if rec.disputed:
+        shown = ", ".join(rec.disputed[:25]) + (" und weitere" if len(rec.disputed) > 25 else "")
+        res.warnings.append(f"{len(rec.disputed)} Takt(e), in denen sich die Erkenner nicht einig sind, bitte prüfen: {shown}")
     return res
 
 

@@ -1,0 +1,3 @@
+[
+  {"name": "bach-choral", "pdf": "tests/data/bach_bwv66_6.pdf", "reference": "tests/data/bach_bwv66_6.musicxml"}
+]

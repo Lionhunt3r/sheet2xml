@@ -8,9 +8,17 @@ Als Eingabe gehen PDFs, Scans und Handyfotos.
 | Eingabe | Weg | Genauigkeit |
 |---|---|---|
 | PDF aus einem Notenprogramm (Sibelius, Dorico, Finale, MuseScore) | Die Noten werden direkt aus dem PDF gelesen: Notenköpfe, Hälse, Balken, Vorzeichen, Bögen und Stimmen stehen dort als Zeichen und Linien. | sehr hoch, meist fehlerfrei |
-| Scan oder Foto | Das Bild wird entzerrt, begradigt und aufgehellt. Danach erkennt [Audiveris](https://github.com/Audiveris/audiveris) die Noten (optische Notenerkennung). | ordentlich bei sauberen Vorlagen, bitte gegenlesen |
+| Scan oder Foto | Das Bild wird entzerrt, begradigt und aufgehellt. Danach lesen es drei Erkenner unabhängig voneinander: [homr](https://github.com/liebharc/homr), [copisteria](https://github.com/kobimusic/copisteria) und [Audiveris](https://github.com/Audiveris/audiveris). Ihre Lesungen werden Takt für Takt zu einer zusammengeführt. | in unserer Testreihe sind 94 % der Takte fehlerfrei (Audiveris allein: 70 %); strittige Takte werden genannt |
 
 Ob ein PDF Notensatz-Daten enthält, erkennt das Programm selbst.
+
+Bei Scans und Fotos liefert homr die Noten, weil es sie am genauesten liest. Lesen die beiden anderen einen Takt
+übereinstimmend anders, gilt ihre Lesung. Sind sich alle drei uneins, bleibt die von homr stehen und der Takt wird
+als strittig gemeldet: dort sitzen die meisten verbliebenen Fehler. Was homr nicht kennt, kommt von den anderen:
+Gabeln und 8va-Linien von copisteria, Liedtext, Tempo- und Vortragsangaben, Studierzeichen und Akkordsymbole
+von Audiveris, Haltebögen von jedem, der denselben Takt gleich gelesen und den Bogen gesehen hat.
+Bei langen Pausen gilt die größere gelesene Taktzahl.
+Fehlt ein Erkenner oder fällt er aus, arbeiten die übrigen weiter.
 
 Aus PDFs von Notenprogrammen werden außer den Noten auch Liedtexte (mehrere Strophen), Dynamik, Vortrags- und Tempoangaben,
 Akkordsymbole (als echte Akkorde, z.B. `Bbmin7/Ab`) und Studierbuchstaben übernommen.
@@ -40,6 +48,8 @@ Einstellungen über Umgebungsvariablen (z. B. in einer `.env`-Datei neben `docke
 | `SHEET2XML_TOKEN` | schützt den Server mit einem Zugangsschlüssel |
 | `SHEET2XML_WORKERS` | gleichzeitige Umwandlungen (Standard 2) |
 | `SHEET2XML_MAX_UPLOAD_MB` | maximale Uploadgröße (Standard 80) |
+| `SHEET2XML_ENGINES` | welche Erkenner Scans und Fotos lesen (Standard: alle installierten, `homr,copisteria,audiveris`). Auf einem langsamen Rechner z. B. `homr,audiveris`; `audiveris` allein verhält sich wie früher |
+| `AUDIVERIS_SWITCHES` | Audiveris-Erkennungen, die zusätzlich eingeschaltet werden (Standard `tremolos,implicitTuplets,chordNames`; z. B. `smallHeads` für Stichnoten ergänzen) |
 
 **TrueNAS SCALE:** Jeder Push auf `main` baut das Image automatisch als `ghcr.io/lionhunt3r/sheet2xml:latest`.
 Unter *Apps → Discover Apps → Custom App* dieses Image eintragen, Container-Port 8000 auf einen freien Port legen und
@@ -48,6 +58,11 @@ die Umgebungsvariablen oben nach Bedarf setzen. Ist das Paket auf GitHub privat,
 Alternativ per Shell im geklonten Ordner `docker compose up -d --build`.
 
 **Mac mit Apple Silicon:** Docker Desktop installieren, dann wie oben. Das Image ist für x86_64 gebaut und läuft über Rosetta.
+Die beiden neuronalen Erkenner rechnen dort deutlich langsamer als auf einem x86-Server; wenn eine Seite zu lange
+dauert, mit `SHEET2XML_ENGINES=homr,audiveris` einen weglassen.
+
+Das Image enthält alle drei Erkenner samt ihrer Modelle (rund 2 GB mehr als mit Audiveris allein) und braucht
+im Betrieb kein Netz. Auf einem Server mit 4 Kernen dauert eine Seite etwa 40 Sekunden.
 
 ## App (Flutter)
 
@@ -75,9 +90,16 @@ sheet2xml seite1.jpg seite2.jpg -o lied.musicxml
 sheet2xml "Partitur.pdf" --review        # auffällige Takte von Claude prüfen lassen
 ```
 
-Für Scans und Fotos muss [Audiveris](https://github.com/Audiveris/audiveris/releases) installiert sein
-(Pfad bei Bedarf über `AUDIVERIS_BIN`), für Liedtexte zusätzlich die Tesseract-Modelle `deu` und `eng`
-aus [tessdata](https://github.com/tesseract-ocr/tessdata) (Ordner über `TESSDATA_PREFIX`).
+Für Scans und Fotos muss mindestens ein Erkenner installiert sein; je mehr, desto besser das Ergebnis:
+
+- [Audiveris](https://github.com/Audiveris/audiveris/releases) (Pfad bei Bedarf über `AUDIVERIS_BIN`), für Liedtexte
+  zusätzlich die Tesseract-Modelle `deu` und `eng` aus [tessdata](https://github.com/tesseract-ocr/tessdata)
+  (Ordner über `TESSDATA_PREFIX`)
+- [homr](https://github.com/liebharc/homr): `pip install "homr[cpu]"` in eine eigene Umgebung, Pfad über `HOMR_BIN`
+- [copisteria](https://github.com/kobimusic/copisteria): Checkout mit Gewichten unter `models/`, gefunden über
+  `COPISTERIA_HOME` und `COPISTERIA_PYTHON`
+
+Das `Dockerfile` zeigt die genauen Schritte.
 
 ## API
 
@@ -98,10 +120,32 @@ pytest
 python tools/evaluate.py ergebnis.musicxml referenz.mxl   # Vergleich mit einer Referenz
 ```
 
+### Erkennung von Scans und Fotos messen
+
+`tools/scanbench.py` misst die Erkenner an einer festen Reihe von Stücken. Aus einem PDF eines Notenprogramms
+macht `tools/degrade.py` künstliche Scans, Kopien und Handyfotos; die richtige Lösung liefert unser PDF-Leser.
+Echte Scans werden gelesen, wie sie sind; dort zählt das Werkzeug Takte mit Rhythmusfehlern und die gefundenen Zeichen.
+
+```bash
+python tools/scanbench.py tools/scanbench-beispiel.json ergebnisse/ --engines audiveris,homr,copisteria,combined
+```
+
+Erkenner: `audiveris` (mit unseren Schaltern), `audiveris-plain` (Werkseinstellung), `homr`, `copisteria` und
+`combined` (die zusammengeführte Lesung, zuletzt nennen). Stand November 2026 auf sechs Stücken, je als Scan,
+Kopie und Handyfoto:
+
+| | Audiveris | homr | copisteria | zusammengeführt |
+|---|---|---|---|---|
+| Takte ganz richtig | 70 % | 91 % | 82 % | 94 % |
+| Noten richtig (Tonhöhe und Dauer) | 90 % | 98 % | 98 % | 99 % |
+| Tremolos gefunden | 24 von 300 | 287 von 300 | 0 von 300 | 287 von 300 |
+| Gabeln gefunden | 15 von 15 | 0 von 15 | 15 von 15 | 15 von 15 |
+
 Aufbau des Codes:
 
 - `src/sheet2xml/vector/`: PDF aus Notenprogrammen lesen (Schriften, Notenzeilen und Systeme, Symbole, Stimmen zuordnen)
-- `src/sheet2xml/omr/`: Bildaufbereitung und Audiveris
+- `src/sheet2xml/omr/`: Bildaufbereitung, die Aufrufe der Erkenner (`audiveris.py`, `engines.py`), das Zusammenführen
+  ihrer Lesungen (`combine.py`) und die Prüfung auffälliger Takte am Bild (`review.py`)
 - `src/sheet2xml/review.py`: Prüfung auffälliger Takte durch Claude
 - `src/sheet2xml/musicxml.py`: MusicXML schreiben
 - `src/sheet2xml/web/`: API und Upload-Seite
